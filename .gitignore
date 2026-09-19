@@ -1,0 +1,50 @@
+# ==============================================================================
+# 1. YOCTO / POKY (HeliOs_Project)
+# ==============================================================================
+HeliOs_Project/**/tmp/
+HeliOs_Project/**/sstate-cache/
+HeliOs_Project/**/downloads/
+HeliOs_Project/**/cache/
+HeliOs_Project/poky/meta/
+HeliOs_Project/poky/meta-poky/
+HeliOs_Project/poky/meta-yocto-bsp/
+HeliOs_Project/poky/meta-openembedded/
+HeliOs_Project/poky/meta-raspberrypi/
+HeliOs_Project/poky/meta-flutter/
+HeliOs_Project/poky/bitbake/
+HeliOs_Project/poky/documentation/
+HeliOs_Project/poky/scripts/
+
+# ==============================================================================
+# 2. FLUTTER (Flutter-HeliOs)
+# ==============================================================================
+Flutter-HeliOs/**/.dart_tool/
+Flutter-HeliOs/**/build/
+Flutter-HeliOs/**/.packages
+Flutter-HeliOs/**/.pub/
+Flutter-HeliOs/**/*.tar.gz
+
+# ==============================================================================
+# 3. PYTHON / SIMULADOR (HeliOs_Simulator)
+# ==============================================================================
+HeliOs_Simulator/**/venv/
+HeliOs_Simulator/**/.venv/
+**/__pycache__/
+**/*.py[cod]
+
+# ==============================================================================
+# 4. ARCHIVOS PESADOS, IMÁGENES Y TEMPORALES DE SISTEMA
+# ==============================================================================
+*.wic
+*.wic.bz2
+*.wic.bmap
+*.tar.bz2
+*.tar.xz
+*.ext3
+*.ext4
+*.img
+*.iso
+*.log
+.vscode/
+.idea/
+.DS_Store
