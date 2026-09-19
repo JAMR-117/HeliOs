@@ -1,0 +1,12 @@
+[Unit]
+Description=HeliOs SQLite Logger Daemon
+After=network.target mosquitto.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/bin/helios-logger.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

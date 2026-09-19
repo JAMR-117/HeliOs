@@ -1,0 +1,13 @@
+[Unit]
+Description=HeliOs Network Manager (Captive Portal / Auto-Connect)
+After=network.target local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/helios-network-manager.sh
+Restart=on-failure
+RestartSec=5
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

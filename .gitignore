@@ -1,50 +1,50 @@
 # ==============================================================================
-# 1. YOCTO / POKY (HeliOs_Project)
+# 1. TEMPORALES Y CACHÉS DE YOCTO (NO SUBIR)
 # ==============================================================================
-HeliOs_Project/**/tmp/
-HeliOs_Project/**/sstate-cache/
-HeliOs_Project/**/downloads/
-HeliOs_Project/**/cache/
+**/tmp/
+**/sstate-cache/
+**/downloads/
+**/cache/
+
+# ==============================================================================
+# 2. CAPAS EXTERNAS Y NÚCLEO DE POKY (CÓDIGO DE TERCEROS)
+# ==============================================================================
+HeliOs_Project/poky/bitbake/
+HeliOs_Project/poky/documentation/
+HeliOs_Project/poky/scripts/
 HeliOs_Project/poky/meta/
 HeliOs_Project/poky/meta-poky/
 HeliOs_Project/poky/meta-yocto-bsp/
 HeliOs_Project/poky/meta-openembedded/
 HeliOs_Project/poky/meta-raspberrypi/
 HeliOs_Project/poky/meta-flutter/
-HeliOs_Project/poky/bitbake/
-HeliOs_Project/poky/documentation/
-HeliOs_Project/poky/scripts/
+HeliOs_Project/poky/meta-selftest/
+HeliOs_Project/poky/meta-skeleton/
 
 # ==============================================================================
-# 2. FLUTTER (Flutter-HeliOs)
+# 3. TEMPORALES DE FLUTTER
 # ==============================================================================
-Flutter-HeliOs/**/.dart_tool/
-Flutter-HeliOs/**/build/
-Flutter-HeliOs/**/.packages
-Flutter-HeliOs/**/.pub/
-Flutter-HeliOs/**/*.tar.gz
+**/build/
+**/.dart_tool/
+**/.packages
+**/.pub/
+*.tar.gz
 
 # ==============================================================================
-# 3. PYTHON / SIMULADOR (HeliOs_Simulator)
+# 4. PYTHON Y SIMULADOR
 # ==============================================================================
-HeliOs_Simulator/**/venv/
-HeliOs_Simulator/**/.venv/
+**/venv/
+**/.venv/
 **/__pycache__/
 **/*.py[cod]
 
 # ==============================================================================
-# 4. ARCHIVOS PESADOS, IMÁGENES Y TEMPORALES DE SISTEMA
+# 5. IMÁGENES GENERADAS Y ARCHIVOS PESADOS
 # ==============================================================================
-*.wic
-*.wic.bz2
-*.wic.bmap
+*.wic*
+*.ext*
 *.tar.bz2
 *.tar.xz
-*.ext3
-*.ext4
 *.img
 *.iso
 *.log
-.vscode/
-.idea/
-.DS_Store

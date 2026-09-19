@@ -1,0 +1,8 @@
+# Partición 1: Arranque (FAT32)
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 100
+
+# Partición 2: Sistema Operativo Inmutable (EXT4 - Read Only)
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label root --align 4096
+
+# Partición 3: Bóveda de Datos Persistentes (EXT4 - Read/Write)
+part /data --ondisk mmcblk0 --fstype=ext4 --label data --size 500 --align 4096
