@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:sqlite3/sqlite3.dart' as sql;
+import 'package:sqlite3/wasm.dart' as sql;
 
 import '../services/mqtt_service.dart';
 
@@ -53,7 +53,7 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
     super.dispose();
   }
 
-  void _loadHistoricalErrors() {
+  void _loadHistoricalErrors() async {
     setState(() => _isLoading = true);
 
     try {
@@ -62,8 +62,11 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
         _loadFallbackData();
         return;
       }
+      final sqlite = await sql.WasmSqlite3.loadFromUrl(Uri.parse('sqlite3.wasm'));
+      final fs = await sql.IndexedDbFileSystem.open(dbName: '/data/helios_history.db');
+      sqlite.registerVirtualFileSystem(fs, makeDefault: true);
 
-      final db = sql.sqlite3.open(_dbPath);
+      final db = sqlite.open(_dbPath);
       final sql.ResultSet resultSet = db.select(
         'SELECT timestamp, code, description FROM scada_errors ORDER BY timestamp DESC;',
       );
@@ -361,7 +364,7 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                     )
                   : ListView.separated(
                       itemCount: _errorLogs.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
                       itemBuilder: (context, index) {
                         final record = _errorLogs[index];
                         final severityColor = _getSeverityColor(record.code);

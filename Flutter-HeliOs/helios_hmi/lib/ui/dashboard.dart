@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:sqlite3/sqlite3.dart' as sql;
+import 'package:sqlite3/wasm.dart' as sql;
 
 import '../services/mqtt_service.dart';
 import 'scada_errors_screen.dart';
@@ -514,6 +514,9 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
   static const Color _bgSelector = Color(0xFF0F172A);
 
   Future<List<Map<String, double>>> _loadHistoricalTelemetry() async {
+    final sqlite = await sql.WasmSqlite3.loadFromUrl(Uri.parse('sqlite3.wasm'));
+    final fs = await sql.IndexedDbFileSystem.open(dbName: '/data/helios_history.db');
+    sqlite.registerVirtualFileSystem(fs, makeDefault: true);
     const dbPath = '/data/helios_history.db';
     final file = File(dbPath);
 
@@ -527,7 +530,7 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
     }
 
     try {
-      final db = sql.sqlite3.open(dbPath);
+      final db = sqlite.open(dbPath);
       final sql.ResultSet results = db.select(
         'SELECT timestamp, p_real, p_exp FROM telemetry_log ORDER BY timestamp DESC LIMIT 50;',
       );
