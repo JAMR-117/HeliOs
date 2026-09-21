@@ -1,10 +1,11 @@
-import 'dart:io';
 import 'dart:math' as math;
 
+
+import 'package:sqlite3/common.dart' as sql;
+import 'package:helios_hmi/database/db_platform.dart'; 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:sqlite3/wasm.dart' as sql;
 
 import '../services/mqtt_service.dart';
 import 'scada_errors_screen.dart';
@@ -514,23 +515,22 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
   static const Color _bgSelector = Color(0xFF0F172A);
 
   Future<List<Map<String, double>>> _loadHistoricalTelemetry() async {
-    final sqlite = await sql.WasmSqlite3.loadFromUrl(Uri.parse('sqlite3.wasm'));
-    final fs = await sql.IndexedDbFileSystem.open(dbName: '/data/helios_history.db');
-    sqlite.registerVirtualFileSystem(fs, makeDefault: true);
     const dbPath = '/data/helios_history.db';
-    final file = File(dbPath);
-
-    if (!file.existsSync()) {
-      return List.generate(50, (index) {
-        final double x = index.toDouble();
-        final double pExp = 4500 + 400 * math.sin(x / 5);
-        final double pReal = pExp * (0.88 + 0.1 * math.cos(x / 3));
-        return {'p_real': pReal, 'p_exp': pExp};
-      });
-    }
+    sql.CommonDatabase? db;
 
     try {
-      final db = sqlite.open(dbPath);
+      db = await openAppDatabase(dbPath);
+
+      // Si no existe el archivo (Linux) o la tabla (Web), usa los datos fallback
+      if (db == null) {
+        return List.generate(50, (index) {
+          final double x = index.toDouble();
+          final double pExp = 4500 + 400 * math.sin(x / 5);
+          final double pReal = pExp * (0.88 + 0.1 * math.cos(x / 3));
+          return {'p_real': pReal, 'p_exp': pExp};
+        });
+      }
+
       final sql.ResultSet results = db.select(
         'SELECT timestamp, p_real, p_exp FROM telemetry_log ORDER BY timestamp DESC LIMIT 50;',
       );
@@ -542,10 +542,11 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
           'p_exp': (row['p_exp'] as num?)?.toDouble() ?? 0.0,
         });
       }
-      db.close();
       return loaded.reversed.toList();
     } catch (_) {
       return [];
+    } finally {
+      db?.dispose();
     }
   }
 

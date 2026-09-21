@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:io';
 
+import 'package:sqlite3/common.dart' as sql;
+import 'package:helios_hmi/database/db_platform.dart'; 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:sqlite3/wasm.dart' as sql;
 
 import '../services/mqtt_service.dart';
 
@@ -55,18 +55,16 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
 
   void _loadHistoricalErrors() async {
     setState(() => _isLoading = true);
+    sql.CommonDatabase? db;
 
     try {
-      final file = File(_dbPath);
-      if (!file.existsSync()) {
+      db = await openAppDatabase(_dbPath);
+
+      if (db == null) {
         _loadFallbackData();
         return;
       }
-      final sqlite = await sql.WasmSqlite3.loadFromUrl(Uri.parse('sqlite3.wasm'));
-      final fs = await sql.IndexedDbFileSystem.open(dbName: '/data/helios_history.db');
-      sqlite.registerVirtualFileSystem(fs, makeDefault: true);
 
-      final db = sqlite.open(_dbPath);
       final sql.ResultSet resultSet = db.select(
         'SELECT timestamp, code, description FROM scada_errors ORDER BY timestamp DESC;',
       );
@@ -82,7 +80,6 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
           ),
         );
       }
-      db.close();
 
       setState(() {
         _errorLogs = loaded;
@@ -91,6 +88,8 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
       });
     } catch (_) {
       _loadFallbackData();
+    } finally {
+      db?.dispose();
     }
   }
 
