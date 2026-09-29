@@ -48,3 +48,12 @@ HeliOs_Project/poky/meta-skeleton/
 *.img
 *.iso
 *.log
+
+# Ignorar compilaciones masivas de Yocto
+HeliOs_Project/poky/build-helios/tmp/
+HeliOs_Project/poky/build-helios/sstate-cache/
+HeliOs_Project/poky/build-helios/downloads/
+HeliOs_Project/poky/build-helios/cache/
+HeliOs_Project/poky/build-helios/oe-rootfs-repo/
+HeliOs_Project/poky/bitbake.lock
+HeliOs_Project/poky/*.log

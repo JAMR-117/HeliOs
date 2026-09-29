@@ -1,0 +1,7 @@
+build-helios/tmp/
+build-helios/sstate-cache/
+build-helios/downloads/
+build-helios/cache/
+build-helios/oe-rootfs-repo/
+bitbake.lock
+*.log
