@@ -1,8 +1,7 @@
 import 'dart:math' as math;
 
-
 import 'package:sqlite3/common.dart' as sql;
-import 'package:helios_hmi/database/db_platform.dart'; 
+import 'package:helios_hmi/database/db_platform.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -170,10 +169,14 @@ class DashboardScreen extends StatelessWidget {
                 style: TextStyle(color: Colors.white70),
               ),
               onTap: () {
-                Navigator.pop(context);
+                Navigator.pop(
+                  context,
+                ); // 1. Cierra el menú lateral correctamente
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => const ScadaErrorsScreen()),
+                  MaterialPageRoute(
+                    builder: (_) => const ScadaErrorsScreen(),
+                  ), // 2. Apila la pantalla de Errores
                 );
               },
             ),
@@ -184,10 +187,14 @@ class DashboardScreen extends StatelessWidget {
                 style: TextStyle(color: Colors.white70),
               ),
               onTap: () {
-                Navigator.pop(context);
+                Navigator.pop(
+                  context,
+                ); // 1. Cierra el menú lateral correctamente
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => const PlantConfigScreen()),
+                  MaterialPageRoute(
+                    builder: (_) => const PlantConfigScreen(),
+                  ), // 2. Apila la pantalla de Configuración
                 );
               },
             ),

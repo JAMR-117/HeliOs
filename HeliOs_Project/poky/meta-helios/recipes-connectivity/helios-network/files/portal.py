@@ -37,42 +37,89 @@ def generate_html():
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>HeliOs Setup</title>
     <style>
-        :root {{ --bg: #121212; --card: #1e1e1e; --brand: #00bcd4; --text: #fff; }}
+        :root {{ --bg: #121212; --card: #1e1e1e; --brand: #00bcd4; --text: #fff; --border: #333; }}
         body {{ font-family: sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; box-sizing: border-box; }}
-        .card {{ background: var(--card); padding: 40px 30px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); width: 100%; max-width: 400px; text-align: center; }}
-        h2 {{ margin-top: 0; color: var(--brand); }}
-        h3 {{ color: #b3b3b3; font-size: 14px; text-align: left; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px; }}
-        select, input {{ width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #333; border-radius: 8px; background: #2c2c2c; color: white; font-size: 14px; box-sizing: border-box; }}
+        .card {{ background: var(--card); padding: 30px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); width: 100%; max-width: 450px; }}
+        h2 {{ margin-top: 0; color: var(--brand); text-align: center; }}
+        h3 {{ color: var(--brand); border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-top: 25px; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }}
+        p.subtitle {{ color: #b3b3b3; text-align: center; margin-bottom: 25px; }}
+        
+        select, input {{ width: 100%; padding: 14px; margin-bottom: 15px; border: 1px solid var(--border); border-radius: 8px; background: #2c2c2c; color: white; font-size: 15px; box-sizing: border-box; }}
         select {{ cursor: pointer; appearance: auto; }}
         select:focus, input:focus {{ outline: none; border-color: var(--brand); }}
-        button {{ width: 100%; padding: 16px; background: var(--brand); color: #000; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 10px; }}
+        
         .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
         .field-group {{ text-align: left; }}
-        .field-group label {{ font-size: 12px; color: #888; }}
+        .field-group label {{ font-size: 12px; color: #888; display: block; margin-bottom: 5px; }}
+        
+        button {{ width: 100%; padding: 16px; margin-top: 10px; background: var(--brand); color: #000; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }}
+        button:hover {{ opacity: 0.8; }}
+        
+        /* Estilos para el campo de contraseña con botón visible */
+        .password-container {{ position: relative; width: 100%; }}
+        .password-container input {{ width: 100%; padding-right: 45px; box-sizing: border-box; }}
+        .toggle-icon {{ position: absolute; right: 15px; top: 14px; cursor: pointer; font-size: 18px; user-select: none; filter: grayscale(100%); opacity: 0.7; }}
     </style>
 </head>
 <body>
     <div class="card">
         <h2>HeliOs Network</h2>
+        <p class="subtitle">Configuración SCADA y Parámetros</p>
         <form method="POST" action="/">
+            
             <h3>1. Red Industrial</h3>
             <select name="ssid" required>
-                <option value="" disabled selected>Seleccione la red...</option>
+                <option value="" disabled selected>Seleccione la red Wi-Fi...</option>
                 {options}
             </select>
-            <input type="password" name="pass" placeholder="Contraseña" required minlength="8">
             
-            <h3>2. Parámetros Fotovoltaicos</h3>
-            <div class="grid-2">
-                <div class="field-group"><label>Voc (V)</label><input type="number" step="0.1" name="voc" required></div>
-                <div class="field-group"><label>Isc (A)</label><input type="number" step="0.1" name="isc" required></div>
-                <div class="field-group"><label>Potencia (Wp)</label><input type="number" step="0.1" name="wp" required></div>
-                <div class="field-group"><label>Paneles Serie</label><input type="number" step="1" name="serie" required></div>
-                <div class="field-group" style="grid-column: span 2;"><label>Cadenas Paralelo</label><input type="number" step="1" name="paralelo" required></div>
+            <div class="password-container">
+                <input type="password" id="passInput" name="pass" placeholder="Contraseña WPA2 (Mín. 8 caracteres)" required minlength="8">
+                <span class="toggle-icon" id="togglePassword" onclick="togglePass()">👁️</span>
             </div>
-            <button type="submit">Guardar y Conectar</button>
+            
+            <h3>2. Arreglo Fotovoltaico</h3>
+            <div class="grid-2">
+                <div class="field-group">
+                    <label>Voc por Panel (V)</label>
+                    <input type="number" step="0.1" name="voc" value="45.5" required>
+                </div>
+                <div class="field-group">
+                    <label>Isc por Panel (A)</label>
+                    <input type="number" step="0.1" name="isc" value="10.8" required>
+                </div>
+                <div class="field-group">
+                    <label>Potencia Pico (Wp)</label>
+                    <input type="number" step="0.1" name="wp" value="450.0" required>
+                </div>
+                <div class="field-group">
+                    <label>Paneles en Serie</label>
+                    <input type="number" step="1" name="serie" value="4" required>
+                </div>
+                <div class="field-group" style="grid-column: span 2;">
+                    <label>Cadenas en Paralelo</label>
+                    <input type="number" step="1" name="paralelo" value="1" required>
+                </div>
+            </div>
+
+            <button type="submit">Guardar y Reiniciar</button>
         </form>
     </div>
+    
+    <script>
+        function togglePass() {{
+            var passInput = document.getElementById("passInput");
+            var toggleIcon = document.getElementById("togglePassword");
+            
+            if (passInput.type === "password") {{
+                passInput.type = "text";
+                toggleIcon.textContent = "🙈"; 
+            }} else {{
+                passInput.type = "password";
+                toggleIcon.textContent = "👁️"; 
+            }}
+        }}
+    </script>
 </body>
 </html>"""
 
@@ -105,11 +152,11 @@ class Portal(BaseHTTPRequestHandler):
             config = {
                 'ssid': data.get('ssid', [''])[0],
                 'pass': data.get('pass', [''])[0],
-                'voc': float(data.get('voc', [0.0])[0]),
-                'isc': float(data.get('isc', [0.0])[0]),
-                'wp': float(data.get('wp', [0.0])[0]),
-                'serie': int(data.get('serie', [0])[0]),
-                'paralelo': int(data.get('paralelo', [0])[0])
+                'voc': float(data.get('voc', ['0'])[0]),
+                'isc': float(data.get('isc', ['0'])[0]),
+                'wp': float(data.get('wp', ['0'])[0]),
+                'serie': int(data.get('serie', ['0'])[0]),
+                'paralelo': int(data.get('paralelo', ['0'])[0])
             }
             
             with bloqueo_archivo:
@@ -121,8 +168,11 @@ class Portal(BaseHTTPRequestHandler):
                 
                 with open('/data/wifi_config.json', 'w') as f:
                     json.dump(config, f)
+                
+                # PERMISOS PÚBLICOS: Hacemos el archivo legible para Flutter (Usuario Weston)
+                os.chmod('/data/wifi_config.json', 0o666)
             
-            response_msg = b"<!DOCTYPE html><html><body style='background:#121212;color:#00bcd4;text-align:center;padding:50px;font-family:sans-serif;'><h2>Configuracion Guardada</h2><p style='color:#fff;'>El Cerebro Energetico se reiniciara.</p></body></html>"
+            response_msg = b"<!DOCTYPE html><html><body style='background:#121212;color:#00bcd4;text-align:center;padding:50px;font-family:sans-serif;'><h2>Configuracion Aplicada</h2><p style='color:#fff;'>HeliOs procesara los parametros del arreglo solar y el Gateway se reiniciara.</p></body></html>"
             
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
@@ -130,8 +180,8 @@ class Portal(BaseHTTPRequestHandler):
             self.send_header('Connection', 'close')
             self.end_headers()
             self.wfile.write(response_msg)
-            self.wfile.flush()
             
+            self.wfile.flush()
             threading.Thread(target=reiniciar_sistema).start()
         except Exception as e:
             self.send_response(500)
