@@ -2,16 +2,18 @@ import json
 import sqlite3
 import os
 import paho.mqtt.client as mqtt
+from datetime import datetime
 
 DB_PATH = "/data/helios_history.db"
 
 SUNSPEC_ERRORS = {
-    0:  "Operación Normal",
-    1:  "Sobrevoltaje de Red",
-    13: "Fuga a Tierra Detectada",
-    14: "Sobrecalentamiento del Inversor",
-    101: "Pérdida de Panel en Serie",
-    102: "Sombreo o Suciedad Detectada",
+    0:   "Operación Normal",
+    1:   "Sobrevoltaje de Red",
+    13:  "Fuga a Tierra Detectada",
+    14:  "Sobrecalentamiento del Inversor",
+    101: "Pérdida de Panel en Serie Detectada",
+    102: "Sombreo o Suciedad en Arreglo Fotovoltaico",
+    103: "Alerta Térmica: Sobrecalentamiento en Inversor (>65°C)",
 }
 
 # Estado SPA compartido (actualizado por tópico helios/spa/expected)
@@ -49,7 +51,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
         client.subscribe([
             ("helios/inverter/telemetry", 0),
-            ("helios/spa/expected", 0),
+            ("helios/spa/expected",       0),
         ])
         print("[INFO] helios-scada: suscrito a telemetría e SPA.")
     else:
@@ -57,7 +59,6 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 def on_message(client, userdata, msg):
     global latest_spa
-    from datetime import datetime
     now_str = datetime.now().isoformat()
 
     try:
@@ -65,21 +66,22 @@ def on_message(client, userdata, msg):
     except json.JSONDecodeError:
         return
 
-    # --- Actualizar estado SPA (para comparación en tiempo real) ---
+    # --- Actualizar estado SPA ---
     if msg.topic == "helios/spa/expected":
-        latest_spa["ghi"]     = float(data.get("ghi", 0.0))
-        latest_spa["v_exp"]   = float(data.get("v_exp", 0.0))
-        latest_spa["p_exp"]   = float(data.get("p_exp", 0.0))
-        latest_spa["is_night"] = bool(data.get("is_night", True))
+        latest_spa["ghi"]      = float(data.get("ghi",      0.0))
+        latest_spa["v_exp"]    = float(data.get("v_exp",    0.0))
+        latest_spa["p_exp"]    = float(data.get("p_exp",    0.0))
+        latest_spa["is_night"] = bool(data.get("is_night",  True))
         return
 
-    # --- Procesar telemetría del inversor ---
     if msg.topic != "helios/inverter/telemetry":
         return
 
-    fault_code = int(data.get("fault", 0))
-    v_dc       = float(data.get("v_dc", 0.0))
+    # --- Procesar telemetría del inversor ---
+    fault_code = int(data.get("fault",   0))
+    v_dc       = float(data.get("v_dc",  0.0))
     power_w    = float(data.get("power_w", 0.0))
+    temp_c     = float(data.get("temp_c", 0.0))
 
     ghi      = latest_spa["ghi"]
     v_exp    = latest_spa["v_exp"]
@@ -88,7 +90,7 @@ def on_message(client, userdata, msg):
 
     alert = None
 
-    # --- Falla hardware SunSpec (siempre prioritaria) ---
+    # Prioridad 1: Falla hardware SunSpec
     if fault_code != 0:
         alert = {
             "inverter":    data.get("inverter", 1),
@@ -96,7 +98,15 @@ def on_message(client, userdata, msg):
             "description": SUNSPEC_ERRORS.get(fault_code, "Error Desconocido"),
         }
 
-    # --- Anomalías de planta (solo de DÍA, sin falsos positivos nocturnos) ---
+    # Prioridad 2: Alerta Térmica (siempre activa, independiente de día/noche)
+    elif temp_c > 65.0:
+        alert = {
+            "inverter":    data.get("inverter", 1),
+            "code":        103,
+            "description": SUNSPEC_ERRORS[103],
+        }
+
+    # Prioridad 3: Anomalías de planta — SOLO en modo DÍA
     elif not is_night and ghi > 20.0 and v_exp > 0:
         if v_dc < v_exp * 0.90:
             alert = {
@@ -112,30 +122,26 @@ def on_message(client, userdata, msg):
             }
 
     if alert:
-        # Publicar con retain=True para que Flutter reciba la última alerta al conectarse
+        # Publicar y persistir alerta activa
         client.publish("helios/scada/alerts", json.dumps(alert), retain=True)
-        # Guardar en SQLite para historial de ScadaErrorsScreen
         guardar_alerta(now_str, alert["code"], alert["description"])
     else:
-        # En modo nocturno o sin fallas, publicar estado limpio con retain
+        # Sin falla: publicar estado limpio
         if is_night and fault_code == 0:
-            estado = {
-                "inverter":    data.get("inverter", 1),
-                "code":        0,
-                "description": "MODO NOCTURNO - ESTIBA ACTIVA",
-            }
+            desc = "Modo Nocturno - Paneles en Estiba"
         else:
-            estado = {
-                "inverter":    data.get("inverter", 1),
-                "code":        0,
-                "description": "Operación Normal",
-            }
+            desc = "Operación Normal"
+
+        estado = {
+            "inverter":    data.get("inverter", 1),
+            "code":        0,
+            "description": desc,
+        }
         client.publish("helios/scada/alerts", json.dumps(estado), retain=True)
 
 init_db()
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.on_connect = on_connect
 client.on_message = on_message
-
 client.connect("127.0.0.1", 1883, 60)
 client.loop_forever()

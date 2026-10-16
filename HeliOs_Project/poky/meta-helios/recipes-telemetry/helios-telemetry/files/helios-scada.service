@@ -1,6 +1,7 @@
 [Unit]
 Description=HeliOs SCADA Translator Daemon
-After=network.target mosquitto.service
+After=network.target mosquitto.service helios-network.service
+Wants=mosquitto.service
 
 [Service]
 Type=simple

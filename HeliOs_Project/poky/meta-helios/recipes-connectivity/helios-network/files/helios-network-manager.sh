@@ -3,7 +3,9 @@ CONFIG_FILE="/data/wifi_config.json"
 WPA_CONF="/tmp/wpa_supplicant.conf"
 
 systemctl stop wpa_supplicant hostapd dnsmasq 2>/dev/null
-killall python3 wpa_supplicant udhcpc 2>/dev/null
+# Matar solo el portal cautivo, NO los daemons de telemetría
+pkill -f portal.py 2>/dev/null
+killall wpa_supplicant udhcpc 2>/dev/null
 
 iniciar_portal() {
     echo "Iniciando Modo Aprovisionamiento (Portal Cautivo)..."
@@ -47,10 +49,28 @@ if [ -f "$CONFIG_FILE" ]; then
         # Abrir permisos de lectura para la app gráfica (Usuario Weston)
         chmod 777 /data
         chmod 666 $CONFIG_FILE 2>/dev/null
+
+        # --- Sincronización de hora por HTTP (NTP/UDP puede estar bloqueado) ---
+        echo "[HeliOs] Sincronizando reloj del sistema via HTTP..."
+        python3 -c "
+import urllib.request, subprocess, email.utils
+try:
+    h = urllib.request.urlopen('http://www.google.com', timeout=5).headers['Date']
+    dt = email.utils.parsedate_to_datetime(h)
+    subprocess.run(['date', '-u', '-s', dt.strftime('%Y-%m-%d %H:%M:%S')], check=True)
+    print('[HeliOs] Reloj sincronizado:', dt.strftime('%Y-%m-%d %H:%M:%S UTC'))
+except Exception as e:
+    print('[HeliOs] No se pudo sincronizar reloj:', e)
+" 2>/dev/null
+
+        # --- Reiniciar daemons de telemetría DESPUÉS de tener red y hora ---
+        echo "[HeliOs] Reiniciando daemons de telemetría..."
+        systemctl restart mosquitto helios-spa helios-scada helios-logger
+
         exit 0
     else
         rm -f "$CONFIG_FILE"
-        killall wpa_supplicant udhcpc
+        killall wpa_supplicant udhcpc 2>/dev/null
         iniciar_portal
     fi
 else
