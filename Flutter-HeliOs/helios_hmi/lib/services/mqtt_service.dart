@@ -1,79 +1,82 @@
 import 'dart:convert';
+import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 
 class MqttService extends ChangeNotifier {
   MqttServerClient? _client;
-
-  // Mapas de memoria reactiva
-  Map<String, dynamic> spaData = {};
-  Map<String, dynamic> scadaData = {};
-  Map<String, dynamic> telemetryData = {}; // NUEVO: Datos crudos SunSpec
   bool isConnected = false;
 
-  Future<void> connect(String serverIp) async {
-    // Usamos el ID de cliente HMI
-    _client = MqttServerClient(serverIp, 'HeliOs_HMI_Client');
+  Map<String, dynamic> telemetryData = {};
+  Map<String, dynamic> spaData = {};
+  Map<String, dynamic> scadaData = {
+    "code": 0,
+    "description": "Operación Normal",
+  };
+
+  Future<void> connect(String brokerIp) async {
+    _client = MqttServerClient(brokerIp, 'helios_hmi_client');
     _client!.port = 1883;
     _client!.keepAlivePeriod = 20;
-    _client!.onDisconnected = _onDisconnected;
+    _client!.autoReconnect =
+        true; // Habilita reconexión nativa si se cae la red
+    _client!.logging(on: false);
 
-    final connMess = MqttConnectMessage().startClean().withWillQos(
-      MqttQos.atLeastOnce,
-    );
-    _client!.connectionMessage = connMess;
+    final connMessage = MqttConnectMessage()
+        .withClientIdentifier('helios_hmi_client')
+        .startClean()
+        .withWillQos(MqttQos.atLeastOnce);
+    _client!.connectionMessage = connMessage;
 
-    try {
-      await _client!.connect();
-    } catch (e) {
-      _client!.disconnect();
-      return;
-    }
+    // Bucle interno de reconexión para la carrera de arranque
+    void attemptConnect() async {
+      try {
+        await _client!.connect();
+        isConnected = true;
+        notifyListeners();
 
-    if (_client!.connectionStatus!.state == MqttConnectionState.connected) {
-      isConnected = true;
-      notifyListeners();
+        _client!.subscribe("helios/inverter/telemetry", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/spa/expected", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/spa/coordinates", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/scada/alerts", MqttQos.atLeastOnce);
 
-      // Suscripciones a la topología completa
-      _client!.subscribe('helios/spa/coordinates', MqttQos.atMostOnce);
-      _client!.subscribe('helios/scada/alerts', MqttQos.atMostOnce);
-      _client!.subscribe(
-        'helios/inverter/telemetry',
-        MqttQos.atMostOnce,
-      ); // NUEVO
+        _client!.updates!.listen((List<MqttReceivedMessage<MqttMessage>> c) {
+          final recMess = c[0].payload as MqttPublishMessage;
+          final payload = MqttPublishPayload.bytesToStringAsString(
+            recMess.payload.message,
+          );
+          final topic = c[0].topic;
 
-      _client!.updates!.listen((List<MqttReceivedMessage<MqttMessage>> c) {
-        final recMess = c[0].payload as MqttPublishMessage;
-        final payload = MqttPublishPayload.bytesToStringAsString(
-          recMess.payload.message,
-        );
-        final topic = c[0].topic;
-
-        _parseTelemetry(topic, payload);
-      });
-    }
-  }
-
-  void _parseTelemetry(String topic, String payload) {
-    try {
-      final data = json.decode(payload);
-      if (topic == 'helios/spa/coordinates') {
-        spaData = data;
-      } else if (topic == 'helios/scada/alerts') {
-        scadaData = data;
-      } else if (topic == 'helios/inverter/telemetry') {
-        telemetryData = data; // Guardamos el JSON de Streamlit
+          try {
+            final data = json.decode(payload);
+            if (topic == "helios/inverter/telemetry") {
+              telemetryData = data;
+            } else if (topic == "helios/spa/expected" ||
+                topic == "helios/spa/coordinates") {
+              spaData.addAll(data);
+            } else if (topic == "helios/scada/alerts") {
+              scadaData = data;
+            }
+            notifyListeners();
+          } catch (_) {}
+        });
+      } catch (e) {
+        isConnected = false;
+        notifyListeners();
+        _client?.disconnect();
+        // Si el broker no está listo en el arranque, reintenta en 5 segundos
+        Future.delayed(const Duration(seconds: 5), attemptConnect);
       }
-      notifyListeners();
-    } catch (e) {
-      // Failsafe: tramas corruptas se ignoran
     }
+
+    attemptConnect(); // Inicia el ciclo
   }
 
-  void _onDisconnected() {
-    isConnected = false;
-    notifyListeners();
+  @override
+  void dispose() {
+    _client?.disconnect();
+    super.dispose();
   }
 }

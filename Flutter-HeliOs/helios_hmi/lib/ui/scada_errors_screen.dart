@@ -30,7 +30,6 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
   static const String _dbPath = '/data/helios_history.db';
   List<ScadaErrorRecord> _errorLogs = [];
   bool _isLoading = false;
-  bool _isUsingFallback = false;
   Timer? _refreshTimer;
 
   static const Color _bgColor = Color(0xFF131B2A);
@@ -61,7 +60,11 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
       db = await openAppDatabase(_dbPath);
 
       if (db == null) {
-        _loadFallbackData();
+        // DB no existe aún — estado limpio sin datos mock
+        setState(() {
+          _errorLogs = [];
+          _isLoading = false;
+        });
         return;
       }
 
@@ -83,45 +86,17 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
 
       setState(() {
         _errorLogs = loaded;
-        _isUsingFallback = false;
         _isLoading = false;
       });
     } catch (_) {
-      _loadFallbackData();
+      // Error de lectura — estado limpio
+      setState(() {
+        _errorLogs = [];
+        _isLoading = false;
+      });
     } finally {
       db?.dispose();
     }
-  }
-
-  void _loadFallbackData() {
-    final mockData = [
-      ScadaErrorRecord(
-        timestamp: '2026-09-16 18:45:12',
-        code: 13,
-        description: 'Fuga a Tierra Detectada (DC)',
-      ),
-      ScadaErrorRecord(
-        timestamp: '2026-09-16 15:20:04',
-        code: 14,
-        description: 'Sobrecalentamiento del Inversor',
-      ),
-      ScadaErrorRecord(
-        timestamp: '2026-09-16 11:05:49',
-        code: 20,
-        description: 'Falla de Arco Eléctrico',
-      ),
-      ScadaErrorRecord(
-        timestamp: '2026-09-15 13:12:30',
-        code: 1,
-        description: 'Sobrevoltaje de Red (AC)',
-      ),
-    ];
-
-    setState(() {
-      _errorLogs = mockData;
-      _isUsingFallback = true;
-      _isLoading = false;
-    });
   }
 
   Color _getSeverityColor(int code) {
@@ -194,40 +169,6 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (_isUsingFallback)
-              Container(
-                margin: const EdgeInsets.only(bottom: 12.0),
-                padding: const EdgeInsets.symmetric(
-                  vertical: 6.0,
-                  horizontal: 12.0,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade900.withValues(alpha: 0.3),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: Colors.amberAccent.withValues(alpha: 0.6),
-                  ),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(
-                      Icons.info_outline,
-                      color: Colors.amberAccent,
-                      size: 18,
-                    ),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Modo Mock Data activo: No se detectó /data/helios_history.db',
-                        style: TextStyle(
-                          color: Colors.amberAccent,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             Row(
               children: [
                 Expanded(
@@ -350,12 +291,13 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                             ),
                             SizedBox(height: 12),
                             Text(
-                              'No se registran eventos de error en el historial',
+                              'Esperando registros históricos en base de datos...',
                               style: TextStyle(
                                 color: _textMuted,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w500,
                               ),
+                              textAlign: TextAlign.center,
                             ),
                           ],
                         ),

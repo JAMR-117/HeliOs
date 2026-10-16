@@ -5,7 +5,7 @@ import paho.mqtt.client as mqtt
 from datetime import datetime
 
 DB_PATH = "/data/helios_history.db"
-latest_expected = {"p_exp": 0.0}
+latest_expected = {"p_exp": 0.0, "is_night": True}
 
 def init_db():
     # Aseguramos que la carpeta exista antes de crear el archivo
@@ -35,20 +35,23 @@ def on_message(client, userdata, msg):
         c = conn.cursor()
         
         if topic == "helios/spa/expected":
-            latest_expected["p_exp"] = data.get("p_exp", 0.0)
+            latest_expected["p_exp"]    = data.get("p_exp", 0.0)
+            latest_expected["is_night"] = data.get("is_night", True)
             
         elif topic == "helios/inverter/telemetry":
             p_real = data.get("power_w", 0.0)
             v_real = data.get("v_dc", 0.0)
             i_real = data.get("i_dc", 0.0)
-            fault = data.get("fault", 0)
+            fault  = data.get("fault", 0)
             
             c.execute("INSERT INTO telemetry_log VALUES (?,?,?,?,?)", 
                       (now, p_real, latest_expected["p_exp"], v_real, i_real))
             
+            # Solo registra fallas hardware SunSpec (anomalías 101/102 las guarda helios-scada)
             if fault != 0:
                 c.execute("INSERT INTO scada_errors VALUES (?,?,?)", 
                           (now, fault, "Falla SunSpec interceptada"))
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -56,9 +59,21 @@ def on_message(client, userdata, msg):
 
 if __name__ == "__main__":
     init_db()
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+
+    def on_connect(client, userdata, flags, reason_code, properties):
+        """Callback compatible con paho-mqtt >= 2.0.0 (CallbackAPIVersion.VERSION2)."""
+        if reason_code == 0:
+            client.subscribe([
+                ("helios/spa/expected", 0),
+                ("helios/inverter/telemetry", 0),
+            ])
+            print("[INFO] HeliOs Logger: suscrito a tópicos MQTT.")
+        else:
+            print(f"[WARN] helios-logger: Conexión rechazada, reason_code={reason_code}")
+
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_connect = on_connect
     client.on_message = on_message
     client.connect("127.0.0.1", 1883, 60)
-    client.subscribe([("helios/spa/expected", 0), ("helios/inverter/telemetry", 0)])
     print("[INFO] HeliOs Logger Daemon ejecutándose...")
     client.loop_forever()

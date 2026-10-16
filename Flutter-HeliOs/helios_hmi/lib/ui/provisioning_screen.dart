@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 class ProvisioningScreen extends StatelessWidget {
-  const ProvisioningScreen({Key? key}) : super(key: key);
+  const ProvisioningScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -62,7 +62,7 @@ class ProvisioningScreen extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.blueAccent.withOpacity(0.3)),
+        border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.3)),
       ),
       width: 600,
       child: Row(

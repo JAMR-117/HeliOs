@@ -10,6 +10,15 @@ SRC_URI = " \
     file://helios-spa.service \
     file://helios-logger.service \
 "
+
+# Se elimina python3-math y se agrega explícitamente python3-pvlib y python3-pandas[cite: 1].
+
+RDEPENDS:${PN} = " \
+    python3-core \
+    python3-paho-mqtt \
+    python3-pvlib \
+    python3-pandas \
+"
 S = "${WORKDIR}"
 
 inherit systemd

@@ -1,4 +1,6 @@
-import 'dart:math' as math;
+import 'dart:io';
+import 'dart:convert';
+import 'dart:async';
 
 import 'package:sqlite3/common.dart' as sql;
 import 'package:helios_hmi/database/db_platform.dart';
@@ -10,8 +12,141 @@ import '../services/mqtt_service.dart';
 import 'scada_errors_screen.dart';
 import 'plant_config_screen.dart';
 
-class DashboardScreen extends StatelessWidget {
+// ===========================================================
+// MODO DE TEMA: Automático / Forzar Día / Forzar Noche
+// ===========================================================
+enum DashboardThemeMode { auto, forceDay, forceNight }
+
+class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
+
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  List<dynamic> _forecastData = [];
+  Timer? _refreshTimer;
+  DashboardThemeMode _themeMode = DashboardThemeMode.auto;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadForecast();
+    // Inicia con reintento rápido (10s) para evadir la carrera de arranque
+    _startForecastTimer(const Duration(seconds: 10));
+  }
+
+  void _startForecastTimer(Duration interval) {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(interval, (_) async {
+      await _loadForecast();
+      // Una vez cargado el pronóstico, cambia al intervalo largo de 5 minutos
+      if (_forecastData.isNotEmpty) {
+        _startForecastTimer(const Duration(minutes: 5));
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  // Lectura del archivo JSON de 10 días generado por el Modelo Astronómico en la Raspberry Pi
+  Future<void> _loadForecast() async {
+    try {
+      final file = File('/data/forecast.json');
+      if (file.existsSync()) {
+        final content = await file.readAsString();
+        final List<dynamic> all = json.decode(content);
+
+        // Filtrar: mostrar solo desde la hora actual (con margen de 59 min atrás)
+        final threshold = DateTime.now().subtract(const Duration(minutes: 59));
+        final filtered = all.where((item) {
+          try {
+            final t = DateTime.parse(item['hora'] as String);
+            return t.isAfter(threshold);
+          } catch (_) {
+            return false;
+          }
+        }).toList();
+
+        setState(() {
+          _forecastData = filtered;
+        });
+      }
+    } catch (e) {
+      debugPrint("Error leyendo pronóstico: $e");
+    }
+  }
+
+  void _showThemeMenu(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E293B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Modo de Tema',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _themeOption(
+              icon: Icons.brightness_auto,
+              label: 'Automático (según irradiancia)',
+              value: DashboardThemeMode.auto,
+            ),
+            _themeOption(
+              icon: Icons.wb_sunny,
+              label: 'Forzar Día',
+              value: DashboardThemeMode.forceDay,
+            ),
+            _themeOption(
+              icon: Icons.nightlight_round,
+              label: 'Forzar Noche',
+              value: DashboardThemeMode.forceNight,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _themeOption({
+    required IconData icon,
+    required String label,
+    required DashboardThemeMode value,
+  }) {
+    final bool selected = _themeMode == value;
+    return ListTile(
+      leading: Icon(icon, color: selected ? const Color(0xFF38BDF8) : Colors.white54),
+      title: Text(
+        label,
+        style: TextStyle(
+          color: selected ? const Color(0xFF38BDF8) : Colors.white70,
+          fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+        ),
+      ),
+      trailing: selected ? const Icon(Icons.check, color: Color(0xFF38BDF8)) : null,
+      onTap: () {
+        setState(() => _themeMode = value);
+        Navigator.pop(context);
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -21,68 +156,117 @@ class DashboardScreen extends StatelessWidget {
     final spa = mqttService.spaData;
     final scada = mqttService.scadaData;
 
-    final double? realPower = (telemetry['power_w'] as num?)?.toDouble();
-    final double? realVoltage = (telemetry['v_dc'] as num?)?.toDouble();
-    final double? realCurrent = (telemetry['i_dc'] as num?)?.toDouble();
-    final double? yieldKwh = (telemetry['yield_kwh'] as num?)?.toDouble();
-    final double? tempC = (telemetry['temp_c'] as num?)?.toDouble();
+    final double? realPower   = (telemetry['power_w'] as num?)?.toDouble();
+    final double? realVoltage = (telemetry['v_dc']    as num?)?.toDouble();
+    final double? realCurrent = (telemetry['i_dc']    as num?)?.toDouble();
+    final double? yieldKwh    = (telemetry['yield_kwh'] as num?)?.toDouble();
+    final double? tempC       = (telemetry['temp_c']  as num?)?.toDouble();
 
-    final double? expPower = (spa['p_exp'] as num?)?.toDouble();
-    final double? expVoltage = (spa['v_exp'] as num?)?.toDouble();
-    final double? expCurrent = (spa['i_exp'] as num?)?.toDouble();
-    final double? azimuth = (spa['azimuth'] as num?)?.toDouble();
-    final double? elevation = (spa['elevation'] as num?)?.toDouble();
+    final double? expPower   = (spa['p_exp']     as num?)?.toDouble();
+    final double? expVoltage = (spa['v_exp']     as num?)?.toDouble();
+    final double? expCurrent = (spa['i_exp']     as num?)?.toDouble();
+    final double? ghi        = (spa['ghi']       as num?)?.toDouble();
+    final double? motorAz    = (spa['motor_azimuth']   as num?)?.toDouble() ??
+        (spa['azimuth'] as num?)?.toDouble();
+    final double? motorEl    = (spa['motor_elevation'] as num?)?.toDouble() ??
+        (spa['elevation'] as num?)?.toDouble();
 
-    final int scadaCode = (scada['code'] as num?)?.toInt() ?? 0;
-    final String scadaDesc =
-        scada['description'] as String? ?? 'Operación Normal';
+    // is_night desde el payload SPA; si aún no hay datos, asume noche
+    final bool isNightFromSpa = spa['is_night'] as bool? ?? true;
+
+    // Aplicar override de tema
+    final bool isNight = switch (_themeMode) {
+      DashboardThemeMode.forceDay   => false,
+      DashboardThemeMode.forceNight => true,
+      DashboardThemeMode.auto       => isNightFromSpa,
+    };
+
+    final int scadaCode    = (scada['code']        as num?)?.toInt() ?? 0;
+    final String scadaDesc = scada['description']  as String? ?? 'Operación Normal';
 
     final bool isWaitingData = telemetry.isEmpty && spa.isEmpty;
-    bool hasError = false;
+    bool hasError     = false;
     String alertMessage = "OPERACIÓN NORMAL";
-    Color statusColor = const Color(0xFF1E293B);
-    Color statusBorderColor = Colors.transparent;
 
     if (isWaitingData) {
       alertMessage = "ESPERANDO TELEMETRÍA...";
     } else if (scadaCode != 0) {
-      hasError = true;
+      hasError     = true;
       alertMessage = "FALLA SCADA ($scadaCode): ${scadaDesc.toUpperCase()}";
-      statusColor = Colors.red.shade900.withValues(alpha: 0.4);
-      statusBorderColor = Colors.redAccent;
+    } else if (isNightFromSpa) {
+      // Modo nocturno real (sin falsas alarmas)
+      alertMessage = "MODO NOCTURNO - ESTIBA ACTIVA";
     } else if (realVoltage != null &&
         expVoltage != null &&
         expVoltage > 0 &&
-        realVoltage < (expVoltage * 0.90)) {
-      hasError = true;
+        realVoltage < expVoltage * 0.90) {
+      hasError     = true;
       alertMessage = "ALERTA: PÉRDIDA DE PANEL EN SERIE";
-      statusColor = Colors.red.shade900.withValues(alpha: 0.4);
-      statusBorderColor = Colors.redAccent;
     } else if (realPower != null &&
         expPower != null &&
         expPower > 0 &&
-        realPower < (expPower * 0.85)) {
-      hasError = true;
+        realPower < expPower * 0.85) {
+      hasError     = true;
       alertMessage = "ALERTA: SOMBREO O SUCIEDAD";
-      statusColor = Colors.amber.shade900.withValues(alpha: 0.4);
-      statusBorderColor = Colors.amberAccent;
     }
 
-    const Color bgColor = Color(0xFF131B2A);
-    const Color cardColor = Color(0xFF1E293B);
-    const Color headerColor = Color(0xFF114238);
-    const Color accentBlue = Color(0xFF38BDF8);
-    const Color textMuted = Color(0xFF94A3B8);
+    // -------------------------------------------------------
+    // PALETA DINÁMICA: Día (Claro) vs Noche (Oscuro)
+    // -------------------------------------------------------
+    final Color bgColor;
+    final Color cardColor;
+    final Color headerColor;
+    final Color textPrimary;
+    final Color textMuted;
+    final Color accentBlue = const Color(0xFF38BDF8);
+
+    if (isNight) {
+      // Modo Oscuro (Estiba Nocturna)
+      bgColor     = const Color(0xFF131B2A);
+      cardColor   = const Color(0xFF1E293B);
+      headerColor = const Color(0xFF114238);
+      textPrimary = Colors.white;
+      textMuted   = const Color(0xFF94A3B8);
+    } else {
+      // Modo Claro (Operación Diurna)
+      bgColor     = const Color(0xFFF1F5F9);
+      cardColor   = Colors.white;
+      headerColor = const Color(0xFF166534);
+      textPrimary = const Color(0xFF0F172A);
+      textMuted   = const Color(0xFF475569);
+    }
+
+    final Color statusColor = hasError
+        ? (scadaCode != 0 || (realVoltage != null && expVoltage != null && realVoltage < expVoltage * 0.90)
+            ? Colors.red.shade900.withValues(alpha: 0.4)
+            : Colors.amber.shade900.withValues(alpha: 0.4))
+        : isNightFromSpa
+            ? const Color(0xFF1E3A5F).withValues(alpha: 0.6)
+            : cardColor;
+    final Color statusBorderColor = hasError
+        ? (scadaCode != 0 || (realVoltage != null && expVoltage != null && realVoltage < expVoltage * 0.90)
+            ? Colors.redAccent
+            : Colors.amberAccent)
+        : isNightFromSpa
+            ? Colors.blueAccent.withValues(alpha: 0.5)
+            : Colors.transparent;
+
+    // Motor display values
+    final String motorAzStr = motorAz != null ? motorAz.toStringAsFixed(1) : '--';
+    final String motorElStr = motorEl != null ? motorEl.toStringAsFixed(1) : '--';
+    final String motorSubtitle = isNightFromSpa
+        ? 'Modo Estiba Plana (Seguridad)'
+        : 'Seguimiento Solar Óptimo';
 
     return Scaffold(
       backgroundColor: bgColor,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white, size: 28),
+        iconTheme: IconThemeData(color: isNight ? Colors.white : const Color(0xFF0F172A), size: 28),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 20.0),
+            padding: const EdgeInsets.only(right: 8.0),
             child: Row(
               children: [
                 if (tempC != null) ...[
@@ -99,24 +283,40 @@ class DashboardScreen extends StatelessWidget {
                       fontSize: 13,
                     ),
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 10),
                 ],
                 if (yieldKwh != null) ...[
-                  const Icon(Icons.bolt, color: textMuted, size: 18),
+                  Icon(Icons.bolt, color: textMuted, size: 18),
                   const SizedBox(width: 4),
                   Text(
                     '${yieldKwh.toStringAsFixed(1)} kWh',
-                    style: const TextStyle(color: textMuted, fontSize: 13),
+                    style: TextStyle(color: textMuted, fontSize: 13),
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 10),
                 ],
+                // Botón de tema Sol/Luna
+                IconButton(
+                  icon: Icon(
+                    _themeMode == DashboardThemeMode.forceDay
+                        ? Icons.wb_sunny
+                        : _themeMode == DashboardThemeMode.forceNight
+                            ? Icons.nightlight_round
+                            : Icons.brightness_auto,
+                    color: _themeMode == DashboardThemeMode.forceDay
+                        ? Colors.amberAccent
+                        : _themeMode == DashboardThemeMode.forceNight
+                            ? Colors.indigoAccent
+                            : accentBlue,
+                  ),
+                  tooltip: 'Modo de tema',
+                  onPressed: () => _showThemeMenu(context),
+                ),
                 Icon(
                   mqttService.isConnected ? Icons.cloud_done : Icons.cloud_off,
-                  color: mqttService.isConnected
-                      ? Colors.greenAccent
-                      : Colors.redAccent,
+                  color: mqttService.isConnected ? Colors.greenAccent : Colors.redAccent,
                   size: 24,
                 ),
+                const SizedBox(width: 12),
               ],
             ),
           ),
@@ -127,18 +327,18 @@ class DashboardScreen extends StatelessWidget {
         child: ListView(
           padding: EdgeInsets.zero,
           children: [
-            const DrawerHeader(
+            DrawerHeader(
               decoration: BoxDecoration(color: bgColor),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   Icon(Icons.solar_power, size: 48, color: accentBlue),
-                  SizedBox(height: 12),
+                  const SizedBox(height: 12),
                   Text(
                     'HeliOs OS',
                     style: TextStyle(
-                      color: Colors.white,
+                      color: textPrimary,
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
                     ),
@@ -147,8 +347,8 @@ class DashboardScreen extends StatelessWidget {
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.dashboard, color: accentBlue),
-              title: const Text(
+              leading: Icon(Icons.dashboard, color: accentBlue),
+              title: Text(
                 'Monitoreo Principal',
                 style: TextStyle(
                   color: accentBlue,
@@ -160,41 +360,24 @@ class DashboardScreen extends StatelessWidget {
               onTap: () => Navigator.pop(context),
             ),
             ListTile(
-              leading: const Icon(
-                Icons.warning_amber_rounded,
-                color: Colors.white70,
-              ),
-              title: const Text(
-                'Menú de Errores SCADA',
-                style: TextStyle(color: Colors.white70),
-              ),
+              leading: Icon(Icons.warning_amber_rounded, color: textMuted),
+              title: Text('Menú de Errores SCADA', style: TextStyle(color: textMuted)),
               onTap: () {
-                Navigator.pop(
-                  context,
-                ); // 1. Cierra el menú lateral correctamente
+                Navigator.pop(context);
                 Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (_) => const ScadaErrorsScreen(),
-                  ), // 2. Apila la pantalla de Errores
+                  MaterialPageRoute(builder: (_) => const ScadaErrorsScreen()),
                 );
               },
             ),
             ListTile(
-              leading: const Icon(Icons.settings, color: Colors.white70),
-              title: const Text(
-                'Configuración de Planta',
-                style: TextStyle(color: Colors.white70),
-              ),
+              leading: Icon(Icons.settings, color: textMuted),
+              title: Text('Configuración de Planta', style: TextStyle(color: textMuted)),
               onTap: () {
-                Navigator.pop(
-                  context,
-                ); // 1. Cierra el menú lateral correctamente
+                Navigator.pop(context);
                 Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (_) => const PlantConfigScreen(),
-                  ), // 2. Apila la pantalla de Configuración
+                  MaterialPageRoute(builder: (_) => const PlantConfigScreen()),
                 );
               },
             ),
@@ -207,6 +390,7 @@ class DashboardScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // --- HEADER ---
               Container(
                 height: 120,
                 width: double.infinity,
@@ -214,15 +398,19 @@ class DashboardScreen extends StatelessWidget {
                   color: headerColor,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Column(
+                child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.landscape, size: 48, color: Colors.greenAccent),
-                    SizedBox(height: 8),
-                    Text(
-                      'HEADER ILUSTRATIVO',
+                    Icon(
+                      isNight ? Icons.nightlight_round : Icons.landscape,
+                      size: 48,
+                      color: isNight ? Colors.indigoAccent : Colors.greenAccent,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'SISTEMA DE MONITOREO HELIOS',
                       style: TextStyle(
-                        color: Colors.white70,
+                        color: Colors.white,
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
                         letterSpacing: 1.5,
@@ -232,79 +420,94 @@ class DashboardScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 24),
-              const Text(
-                'Clima por horas',
+              Text(
+                'Pronóstico de Irradiancia y Generación por Hora',
                 style: TextStyle(
-                  color: Colors.white,
+                  color: textPrimary,
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                 ),
               ),
+              Text(
+                'Modelo Astronómico Clear Sky',
+                style: TextStyle(color: textMuted, fontSize: 12),
+              ),
               const SizedBox(height: 12),
+
+              // --- SECCIÓN 1: CARRUSEL DINÁMICO (desde hora actual) ---
               Container(
-                height: 110,
+                height: 125,
                 decoration: BoxDecoration(
                   color: cardColor,
                   borderRadius: BorderRadius.circular(12),
+                  boxShadow: isNight
+                      ? []
+                      : [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8)],
                 ),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      minWidth: MediaQuery.of(context).size.width - 32,
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: List.generate(24, (index) {
+                child: _forecastData.isEmpty
+                    ? Center(
+                        child: Text(
+                          "Sincronizando efemérides solares...",
+                          style: TextStyle(color: textMuted),
+                        ),
+                      )
+                    : ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _forecastData.length,
+                        itemBuilder: (context, index) {
+                          final item  = _forecastData[index];
+                          final time  = DateTime.parse(item['hora']).toLocal();
+                          final double fGhi     = (item['ghi']   as num).toDouble();
+                          final double pExpFore = (item['p_exp'] as num).toDouble();
+                          final bool   isDay    = fGhi > 0;
+
                           return Padding(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 12.0,
-                              vertical: 16.0,
+                              horizontal: 16.0,
+                              vertical: 12.0,
                             ),
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 Text(
-                                  _getFormattedHour(index),
-                                  style: const TextStyle(
-                                    color: textMuted,
-                                    fontSize: 12,
-                                  ),
+                                  "${time.hour.toString().padLeft(2, '0')}:00",
+                                  style: TextStyle(color: textMuted, fontSize: 12),
                                 ),
-                                const Icon(
-                                  Icons.cloud_queue,
-                                  color: Colors.white70,
-                                  size: 24,
+                                Icon(
+                                  isDay ? Icons.wb_sunny : Icons.nightlight_round,
+                                  color: isDay ? Colors.amberAccent : Colors.indigoAccent,
+                                  size: 28,
                                 ),
-                                const Text(
-                                  '22°C',
+                                Text(
+                                  '${fGhi.round()} W/m²',
                                   style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
+                                    color: textPrimary,
+                                    fontSize: 14,
                                     fontWeight: FontWeight.bold,
                                   ),
+                                ),
+                                Text(
+                                  'Est: ${pExpFore.round()} W',
+                                  style: TextStyle(color: accentBlue, fontSize: 11),
                                 ),
                               ],
                             ),
                           );
-                        }),
+                        },
                       ),
-                    ),
-                  ),
-                ),
               ),
               const SizedBox(height: 24),
-              const Text(
+              Text(
                 'Condiciones actuales',
                 style: TextStyle(
-                  color: Colors.white,
+                  color: textPrimary,
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                 ),
               ),
               const SizedBox(height: 12),
+
+              // --- SECCIÓN 2: GRIDVIEW ---
               GridView.count(
                 crossAxisCount: MediaQuery.of(context).size.width > 900 ? 4 : 2,
                 crossAxisSpacing: 16,
@@ -315,103 +518,130 @@ class DashboardScreen extends StatelessWidget {
                 children: [
                   _buildMetricCard(
                     title: 'Potencia',
-                    realValue: realPower != null
-                        ? '${realPower.round()} W'
-                        : '-- W',
-                    expValue: expPower != null
-                        ? '${expPower.round()} W'
-                        : '-- W',
+                    realValue: realPower != null ? '${realPower.round()} W' : '-- W',
+                    expValue: expPower != null ? '${expPower.round()} W' : '-- W',
                     icon: Icons.bolt,
                     cardColor: cardColor,
                     mutedColor: textMuted,
+                    primaryColor: textPrimary,
                     accentColor: accentBlue,
                   ),
                   _buildMetricCard(
                     title: 'Voltaje DC',
-                    realValue: realVoltage != null
-                        ? '${realVoltage.toStringAsFixed(1)} V'
-                        : '-- V',
-                    expValue: expVoltage != null
-                        ? '${expVoltage.toStringAsFixed(1)} V'
-                        : '-- V',
+                    realValue: realVoltage != null ? '${realVoltage.toStringAsFixed(1)} V' : '-- V',
+                    expValue: expVoltage != null ? '${expVoltage.toStringAsFixed(1)} V' : '-- V',
                     icon: Icons.battery_charging_full,
                     cardColor: cardColor,
                     mutedColor: textMuted,
+                    primaryColor: textPrimary,
                     accentColor: accentBlue,
                   ),
                   _buildMetricCard(
                     title: 'Corriente DC',
-                    realValue: realCurrent != null
-                        ? '${realCurrent.toStringAsFixed(1)} A'
-                        : '-- A',
-                    expValue: expCurrent != null
-                        ? '${expCurrent.toStringAsFixed(1)} A'
-                        : '-- A',
+                    realValue: realCurrent != null ? '${realCurrent.toStringAsFixed(1)} A' : '-- A',
+                    expValue: expCurrent != null ? '${expCurrent.toStringAsFixed(1)} A' : '-- A',
                     icon: Icons.electric_meter,
                     cardColor: cardColor,
                     mutedColor: textMuted,
+                    primaryColor: textPrimary,
                     accentColor: accentBlue,
                   ),
+                  // Irradiancia GHI
                   _buildMetricCard(
-                    title: 'Pos. Solar',
-                    realValue: azimuth != null
-                        ? '${azimuth.toStringAsFixed(1)}°'
-                        : '--°',
-                    expValue: elevation != null
-                        ? 'El: ${elevation.toStringAsFixed(1)}°'
-                        : 'El: --°',
-                    icon: Icons.explore,
+                    title: 'Irradiancia (GHI)',
+                    realValue: ghi != null ? '${ghi.round()} W/m²' : '-- W/m²',
+                    expValue: 'Modelo Clear Sky',
+                    icon: Icons.wb_twilight,
                     cardColor: cardColor,
                     mutedColor: textMuted,
-                    accentColor: accentBlue,
+                    primaryColor: textPrimary,
+                    accentColor: Colors.amberAccent,
                     isComparison: false,
                   ),
-                  Container(
-                    decoration: BoxDecoration(
-                      color: statusColor,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: statusBorderColor,
-                        width: hasError ? 2 : 0,
-                      ),
+
+                  // --- TARJETA FUSIONADA: Ángulo Óptimo (Motores) ---
+                  _buildMetricCard(
+                    title: 'Ángulo Óptimo (Motores)',
+                    realValue: 'Az: $motorAzStr° | El: $motorElStr°',
+                    expValue: motorSubtitle,
+                    icon: Icons.solar_power,
+                    cardColor: cardColor,
+                    mutedColor: textMuted,
+                    primaryColor: textPrimary,
+                    accentColor: isNightFromSpa ? Colors.indigoAccent : Colors.tealAccent,
+                    isComparison: false,
+                    valueFontSize: 18,
+                  ),
+
+                  // --- TARJETA CLICKEABLE: Estado del Sistema ---
+                  GestureDetector(
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const ScadaErrorsScreen()),
                     ),
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          hasError
-                              ? Icons.warning_amber_rounded
-                              : (isWaitingData
-                                    ? Icons.hourglass_empty
-                                    : Icons.check_circle_outline),
-                          color: hasError
-                              ? (statusBorderColor == Colors.redAccent
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: statusBorderColor,
+                          width: hasError || isNightFromSpa ? 2 : 0,
+                        ),
+                        boxShadow: isNight
+                            ? []
+                            : [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8)],
+                      ),
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            hasError
+                                ? Icons.warning_amber_rounded
+                                : isNightFromSpa
+                                    ? Icons.bedtime
+                                    : (isWaitingData
+                                        ? Icons.hourglass_empty
+                                        : Icons.check_circle_outline),
+                            color: hasError
+                                ? (statusBorderColor == Colors.redAccent
                                     ? Colors.redAccent
                                     : Colors.amberAccent)
-                              : (isWaitingData
-                                    ? textMuted
-                                    : Colors.greenAccent),
-                          size: 38,
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'Estado del Sistema',
-                          style: TextStyle(color: textMuted, fontSize: 12),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          alertMessage,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: isWaitingData ? textMuted : Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.bold,
+                                : isNightFromSpa
+                                    ? Colors.indigoAccent
+                                    : (isWaitingData ? textMuted : Colors.greenAccent),
+                            size: 34,
                           ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
+                          const SizedBox(height: 6),
+                          Text(
+                            'Estado del Sistema',
+                            style: TextStyle(color: textMuted, fontSize: 11),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            alertMessage,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: isWaitingData ? textMuted : textPrimary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                'Ver detalles SCADA',
+                                style: TextStyle(color: accentBlue, fontSize: 10),
+                              ),
+                              Icon(Icons.arrow_forward_ios, color: accentBlue, size: 10),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -420,6 +650,10 @@ class DashboardScreen extends StatelessWidget {
               MultimodalChartContainer(
                 expPower: expPower,
                 realPower: realPower,
+                cardColor: cardColor,
+                textMuted: textMuted,
+                textPrimary: textPrimary,
+                accentBlue: accentBlue,
               ),
               const SizedBox(height: 40),
             ],
@@ -429,13 +663,6 @@ class DashboardScreen extends StatelessWidget {
     );
   }
 
-  String _getFormattedHour(int index) {
-    int hour24 = (13 + index) % 24;
-    if (hour24 == 0) return '12 AM';
-    if (hour24 == 12) return '12 PM';
-    return hour24 > 12 ? '${hour24 - 12} PM' : '$hour24 AM';
-  }
-
   Widget _buildMetricCard({
     required String title,
     required String realValue,
@@ -443,15 +670,20 @@ class DashboardScreen extends StatelessWidget {
     required IconData icon,
     required Color cardColor,
     required Color mutedColor,
+    required Color primaryColor,
     required Color accentColor,
     bool isComparison = true,
+    double valueFontSize = 24,
   }) {
     return Container(
       decoration: BoxDecoration(
         color: cardColor,
         borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 6),
+        ],
       ),
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -459,12 +691,15 @@ class DashboardScreen extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                title,
-                style: TextStyle(
-                  color: mutedColor,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
+              Flexible(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: mutedColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
               Icon(icon, color: accentColor, size: 20),
@@ -475,18 +710,18 @@ class DashboardScreen extends StatelessWidget {
             children: [
               Text(
                 realValue,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 34,
+                style: TextStyle(
+                  color: primaryColor,
+                  fontSize: valueFontSize,
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 4),
               Text(
                 isComparison ? 'Esperado: $expValue' : expValue,
                 style: TextStyle(
                   color: mutedColor,
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -498,14 +733,25 @@ class DashboardScreen extends StatelessWidget {
   }
 }
 
+// ===========================================================
+// GRÁFICO HISTÓRICO SCADA
+// ===========================================================
 class MultimodalChartContainer extends StatefulWidget {
   final double? expPower;
   final double? realPower;
+  final Color cardColor;
+  final Color textMuted;
+  final Color textPrimary;
+  final Color accentBlue;
 
   const MultimodalChartContainer({
     super.key,
     required this.expPower,
     required this.realPower,
+    required this.cardColor,
+    required this.textMuted,
+    required this.textPrimary,
+    required this.accentBlue,
   });
 
   @override
@@ -514,39 +760,40 @@ class MultimodalChartContainer extends StatefulWidget {
 }
 
 class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
-  int _selectedTab = 0;
+  Timer? _historyTimer;
+  // Clave que cambia cada 15s para forzar el rebuild del FutureBuilder
+  int _refreshKey = 0;
 
-  static const Color _cardColor = Color(0xFF1E293B);
-  static const Color _accentBlue = Color(0xFF38BDF8);
-  static const Color _textMuted = Color(0xFF94A3B8);
-  static const Color _bgSelector = Color(0xFF0F172A);
+  @override
+  void initState() {
+    super.initState();
+    // Auto-refresco del histórico SCADA cada 15 segundos
+    _historyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) setState(() => _refreshKey++);
+    });
+  }
+
+  @override
+  void dispose() {
+    _historyTimer?.cancel();
+    super.dispose();
+  }
 
   Future<List<Map<String, double>>> _loadHistoricalTelemetry() async {
     const dbPath = '/data/helios_history.db';
     sql.CommonDatabase? db;
-
     try {
       db = await openAppDatabase(dbPath);
-
-      // Si no existe el archivo (Linux) o la tabla (Web), usa los datos fallback
-      if (db == null) {
-        return List.generate(50, (index) {
-          final double x = index.toDouble();
-          final double pExp = 4500 + 400 * math.sin(x / 5);
-          final double pReal = pExp * (0.88 + 0.1 * math.cos(x / 3));
-          return {'p_real': pReal, 'p_exp': pExp};
-        });
-      }
+      if (db == null) return [];
 
       final sql.ResultSet results = db.select(
         'SELECT timestamp, p_real, p_exp FROM telemetry_log ORDER BY timestamp DESC LIMIT 50;',
       );
-
       final List<Map<String, double>> loaded = [];
       for (final sql.Row row in results) {
         loaded.add({
           'p_real': (row['p_real'] as num?)?.toDouble() ?? 0.0,
-          'p_exp': (row['p_exp'] as num?)?.toDouble() ?? 0.0,
+          'p_exp':  (row['p_exp']  as num?)?.toDouble() ?? 0.0,
         });
       }
       return loaded.reversed.toList();
@@ -561,141 +808,27 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: _cardColor,
+        color: widget.cardColor,
         borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 6),
+        ],
       ),
       padding: const EdgeInsets.all(16.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Analítica de Rendimiento',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 0.8,
-                ),
-              ),
-              Container(
-                decoration: BoxDecoration(
-                  color: _bgSelector,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                padding: const EdgeInsets.all(4),
-                child: Row(
-                  children: [
-                    _buildTabButton(0, 'En Vivo'),
-                    _buildTabButton(1, 'Histórico SCADA'),
-                    _buildTabButton(2, 'Proyección Salud'),
-                  ],
-                ),
-              ),
-            ],
+          Text(
+            'Histórico SCADA — Potencia Esperada vs Real',
+            style: TextStyle(
+              color: widget.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.8,
+            ),
           ),
           const SizedBox(height: 20),
-          SizedBox(height: 280, child: _buildSelectedChart()),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTabButton(int index, String label) {
-    final bool isSelected = _selectedTab == index;
-    return GestureDetector(
-      onTap: () => setState(() => _selectedTab = index),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected ? _cardColor : Colors.transparent,
-          borderRadius: BorderRadius.circular(6),
-          border: isSelected
-              ? Border.all(color: _accentBlue.withValues(alpha: 0.5))
-              : null,
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: isSelected ? _accentBlue : _textMuted,
-            fontSize: 12,
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSelectedChart() {
-    switch (_selectedTab) {
-      case 0:
-        return _buildLiveChart();
-      case 1:
-        return _buildHistoricalChart();
-      case 2:
-        return _buildHealthProjectionChart();
-      default:
-        return _buildLiveChart();
-    }
-  }
-
-  Widget _buildLiveChart() {
-    final double peak = (widget.expPower != null && widget.expPower! > 500.0)
-        ? widget.expPower!
-        : 5000.0;
-    final List<FlSpot> expectedSpots = [];
-
-    for (double h = 6; h <= 18; h += 0.5) {
-      double eff = math.max(0.0, math.sin(math.pi * (h - 6) / 12));
-      expectedSpots.add(FlSpot(h, peak * eff));
-    }
-
-    final double nowHour = DateTime.now().hour + (DateTime.now().minute / 60.0);
-    final bool hasValidRealPoint =
-        widget.realPower != null && nowHour >= 6 && nowHour <= 18;
-
-    return LineChart(
-      LineChartData(
-        gridData: const FlGridData(show: false),
-        titlesData: _buildDefaultTitlesData(),
-        borderData: FlBorderData(show: false),
-        minX: 6,
-        maxX: 18,
-        minY: 0,
-        maxY: peak * 1.15,
-        lineBarsData: [
-          LineChartBarData(
-            spots: expectedSpots,
-            isCurved: true,
-            color: _accentBlue,
-            barWidth: 3,
-            isStrokeCapRound: true,
-            dotData: const FlDotData(show: false),
-            belowBarData: BarAreaData(
-              show: true,
-              color: _accentBlue.withValues(alpha: 0.12),
-            ),
-          ),
-          if (hasValidRealPoint)
-            LineChartBarData(
-              spots: [FlSpot(nowHour, widget.realPower!)],
-              isCurved: false,
-              color: Colors.amberAccent,
-              barWidth: 0,
-              dotData: FlDotData(
-                show: true,
-                getDotPainter: (spot, percent, barData, index) {
-                  return FlDotCirclePainter(
-                    radius: 6,
-                    color: Colors.amberAccent,
-                    strokeWidth: 2,
-                    strokeColor: Colors.white,
-                  );
-                },
-              ),
-            ),
+          SizedBox(height: 280, child: _buildHistoricalChart()),
         ],
       ),
     );
@@ -703,55 +836,54 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
 
   Widget _buildHistoricalChart() {
     return FutureBuilder<List<Map<String, double>>>(
+      key: ValueKey(_refreshKey),
       future: _loadHistoricalTelemetry(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(
+          return Center(
             child: CircularProgressIndicator(
-              color: _accentBlue,
+              color: widget.accentBlue,
               strokeWidth: 2,
             ),
           );
         }
-
         final data = snapshot.data ?? [];
         if (data.isEmpty) {
-          return const Center(
-            child: Text(
-              'Sin registros históricos en telemetry_log',
-              style: TextStyle(color: _textMuted, fontSize: 13),
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.hourglass_empty, color: widget.textMuted, size: 36),
+                const SizedBox(height: 12),
+                Text(
+                  'Esperando registros históricos en base de datos...',
+                  style: TextStyle(color: widget.textMuted, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ],
             ),
           );
         }
-
         final List<FlSpot> realSpots = [];
-        final List<FlSpot> expSpots = [];
-
+        final List<FlSpot> expSpots  = [];
         for (int i = 0; i < data.length; i++) {
           realSpots.add(FlSpot(i.toDouble(), data[i]['p_real']!));
-          expSpots.add(FlSpot(i.toDouble(), data[i]['p_exp']!));
+          expSpots.add(FlSpot(i.toDouble(),  data[i]['p_exp']!));
         }
-
         return LineChart(
           LineChartData(
             gridData: FlGridData(
               show: true,
               drawVerticalLine: false,
               getDrawingHorizontalLine: (_) => FlLine(
-                color: Colors.white.withValues(alpha: 0.05),
+                color: Colors.grey.withValues(alpha: 0.12),
                 strokeWidth: 1,
               ),
             ),
             titlesData: FlTitlesData(
-              topTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
-              rightTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
-              leftTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
+              topTitles:    const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+              rightTitles:  const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+              leftTitles:   const AxisTitles(sideTitles: SideTitles(showTitles: false)),
               bottomTitles: AxisTitles(
                 sideTitles: SideTitles(
                   showTitles: true,
@@ -759,7 +891,7 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
                   interval: 10,
                   getTitlesWidget: (val, _) => Text(
                     'T-${50 - val.toInt()}',
-                    style: const TextStyle(color: _textMuted, fontSize: 10),
+                    style: TextStyle(color: widget.textMuted, fontSize: 10),
                   ),
                 ),
               ),
@@ -768,161 +900,30 @@ class _MultimodalChartContainerState extends State<MultimodalChartContainer> {
             minX: 0,
             maxX: (data.length - 1).toDouble(),
             lineBarsData: [
+              // Curva Potencia Esperada (Modelo Astronómico)
               LineChartBarData(
                 spots: expSpots,
                 isCurved: true,
-                color: _textMuted.withValues(alpha: 0.6),
+                color: widget.textMuted.withValues(alpha: 0.6),
                 barWidth: 2,
                 dotData: const FlDotData(show: false),
               ),
+              // Curva Potencia Real (inversor)
               LineChartBarData(
                 spots: realSpots,
                 isCurved: true,
-                color: _accentBlue,
+                color: widget.accentBlue,
                 barWidth: 2.5,
                 dotData: const FlDotData(show: false),
                 belowBarData: BarAreaData(
                   show: true,
-                  color: _accentBlue.withValues(alpha: 0.1),
+                  color: widget.accentBlue.withValues(alpha: 0.1),
                 ),
               ),
             ],
           ),
         );
       },
-    );
-  }
-
-  Widget _buildHealthProjectionChart() {
-    return FutureBuilder<List<Map<String, double>>>(
-      future: _loadHistoricalTelemetry(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(
-            child: CircularProgressIndicator(
-              color: _accentBlue,
-              strokeWidth: 2,
-            ),
-          );
-        }
-
-        final data = snapshot.data ?? [];
-        if (data.isEmpty) {
-          return const Center(
-            child: Text(
-              'No hay suficientes muestras para calcular el PR',
-              style: TextStyle(color: _textMuted, fontSize: 13),
-            ),
-          );
-        }
-
-        final List<FlSpot> prSpots = [];
-        for (int i = 0; i < data.length; i++) {
-          final pExp = data[i]['p_exp']!;
-          final pReal = data[i]['p_real']!;
-          double pr = pExp > 0 ? (pReal / pExp) : 1.0;
-          pr = pr.clamp(0.0, 1.2);
-          prSpots.add(FlSpot(i.toDouble(), pr * 100));
-        }
-
-        return LineChart(
-          LineChartData(
-            gridData: FlGridData(
-              show: true,
-              drawVerticalLine: false,
-              getDrawingHorizontalLine: (val) {
-                if (val == 85.0) {
-                  return const FlLine(
-                    color: Colors.amberAccent,
-                    strokeWidth: 1,
-                    dashArray: [4, 4],
-                  );
-                }
-                return FlLine(
-                  color: Colors.white.withValues(alpha: 0.05),
-                  strokeWidth: 1,
-                );
-              },
-            ),
-            titlesData: FlTitlesData(
-              topTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
-              rightTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
-              leftTitles: AxisTitles(
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  reservedSize: 34,
-                  interval: 20,
-                  getTitlesWidget: (val, _) => Text(
-                    '${val.toInt()}%',
-                    style: const TextStyle(color: _textMuted, fontSize: 10),
-                  ),
-                ),
-              ),
-              bottomTitles: AxisTitles(
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  reservedSize: 22,
-                  interval: 10,
-                  getTitlesWidget: (val, _) => Text(
-                    'P-${val.toInt()}',
-                    style: const TextStyle(color: _textMuted, fontSize: 10),
-                  ),
-                ),
-              ),
-            ),
-            borderData: FlBorderData(show: false),
-            minX: 0,
-            maxX: (data.length - 1).toDouble(),
-            minY: 40,
-            maxY: 110,
-            lineBarsData: [
-              LineChartBarData(
-                spots: prSpots,
-                isCurved: true,
-                color: const Color(0xFF10B981),
-                barWidth: 2.5,
-                dotData: const FlDotData(show: false),
-                belowBarData: BarAreaData(
-                  show: true,
-                  color: Colors.greenAccent.withValues(alpha: 0.1),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  FlTitlesData _buildDefaultTitlesData() {
-    return FlTitlesData(
-      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-      leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-      bottomTitles: AxisTitles(
-        sideTitles: SideTitles(
-          showTitles: true,
-          reservedSize: 22,
-          interval: 3,
-          getTitlesWidget: (value, meta) {
-            if (value == 6 ||
-                value == 9 ||
-                value == 12 ||
-                value == 15 ||
-                value == 18) {
-              return Text(
-                '${value.toInt()}:00',
-                style: const TextStyle(color: _textMuted, fontSize: 12),
-              );
-            }
-            return const Text('');
-          },
-        ),
-      ),
     );
   }
 }
