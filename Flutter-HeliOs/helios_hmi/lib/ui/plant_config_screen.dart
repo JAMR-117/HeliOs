@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../database/db_platform.dart';
+import '../services/mqtt_service.dart';
 import '../theme/helios_theme.dart';
 
 class PlantConfigScreen extends StatefulWidget {
@@ -24,8 +26,6 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
   bool _isLoading = false;
   bool _isUsingFallback = false;
 
-  static const Color _cardColor = HeliosTheme.blueFantastic;
-  static const Color _textMuted = HeliosTheme.oatmeal;
   static const Color _accentBlue = HeliosTheme.burningFlame;
   static const Color _accentOrange = HeliosTheme.truffleTrouble;
 
@@ -75,61 +75,105 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
     });
   }
 
-  void _showStowModeDialog() {
+  void _showStowModeDialog(BuildContext context, bool isNight) {
+    final Color dialogBg = isNight ? const Color(0xFF1E293B) : Colors.white;
+    final Color dialogTextPrimary = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+    final Color dialogTextMuted = isNight ? HeliosTheme.oatmeal : const Color(0xFF475569);
+
     showDialog(
       context: context,
-      builder: (BuildContext context) {
+      builder: (BuildContext ctx) {
         return AlertDialog(
-          backgroundColor: _cardColor,
+          backgroundColor: dialogBg,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
             side: BorderSide(
-              color: HeliosTheme.oatmeal.withValues(alpha: 0.2),
+              color: isNight
+                  ? HeliosTheme.oatmeal.withValues(alpha: 0.2)
+                  : const Color(0xFFE2E8F0),
             ),
           ),
-          title: const Row(
+          title: Row(
             children: [
-              Icon(Icons.shield_outlined, color: HeliosTheme.burningFlame, size: 28),
-              SizedBox(width: 10),
+              const Icon(Icons.shield_outlined, color: _accentBlue, size: 28),
+              const SizedBox(width: 10),
               Text(
                 'Modo Estiba (Flat-Stow)',
                 style: TextStyle(
-                  color: HeliosTheme.palladian,
+                  color: dialogTextPrimary,
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
                 ),
               ),
             ],
           ),
-          content: const Text(
-            'Se enviará un comando preventivo de seguridad al bus de actuación. Los paneles se posicionarán en ángulo plano horizontal (0°) para mitigar cargas mecánicas por viento.',
-            style: TextStyle(color: _textMuted, fontSize: 14),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Esta operación ordenará a los actuadores mecánicos colocar el arreglo '
+                'fotovoltaico en posición horizontal plana (Elevación 90°, Azimut 180°).',
+                style: TextStyle(
+                  color: dialogTextMuted,
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _accentOrange.withValues(alpha: isNight ? 0.2 : 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _accentOrange.withValues(alpha: 0.5),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: _accentOrange, size: 22),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Protocolo de seguridad por ráfagas de viento o mantenimiento.',
+                        style: TextStyle(
+                          color: dialogTextPrimary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(
                 'Cancelar',
-                style: TextStyle(color: _textMuted),
+                style: TextStyle(color: dialogTextMuted),
               ),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 backgroundColor: _accentOrange,
-                foregroundColor: HeliosTheme.palladian,
+                foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
               onPressed: () {
-                Navigator.pop(context);
+                Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
                     content: Text(
                       'Comando emitido: Arreglo posicionado en Modo Estiba Preventivo',
-                      style: TextStyle(color: HeliosTheme.palladian),
+                      style: TextStyle(color: Colors.white),
                     ),
-                    backgroundColor: HeliosTheme.truffleTrouble,
+                    backgroundColor: _accentOrange,
                   ),
                 );
               },
@@ -143,6 +187,19 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final mqttService = context.watch<MqttService>();
+    final bool isNight = mqttService.isNight;
+
+    final Color bgColor = isNight ? const Color(0xFF131B2A) : const Color(0xFFF1F5F9);
+    final Gradient? bgGradient = isNight ? HeliosTheme.nightBackgroundGradient : null;
+    final Color cardColor = isNight ? const Color(0xFF1E293B) : Colors.white;
+    final Color cardBorderColor = isNight
+        ? HeliosTheme.oatmeal.withValues(alpha: 0.2)
+        : const Color(0xFFE2E8F0);
+    final Color textPrimary = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+    final Color textMuted = isNight ? HeliosTheme.oatmeal : const Color(0xFF475569);
+    final Color appBarItemColor = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+
     final double totalPeakKw = (_serie * _paralelo * _wp) / 1000.0;
     final double totalVoc = _serie * _voc;
     final double totalIsc = _paralelo * _isc;
@@ -152,11 +209,11 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        leading: const BackButton(color: HeliosTheme.palladian),
-        title: const Text(
+        leading: BackButton(color: appBarItemColor),
+        title: Text(
           'Configuración de Planta',
           style: TextStyle(
-            color: HeliosTheme.palladian,
+            color: appBarItemColor,
             fontWeight: FontWeight.bold,
             letterSpacing: 1.2,
           ),
@@ -182,8 +239,9 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
       body: Container(
         width: double.infinity,
         height: double.infinity,
-        decoration: const BoxDecoration(
-          gradient: HeliosTheme.nightBackgroundGradient,
+        decoration: BoxDecoration(
+          color: bgColor,
+          gradient: bgGradient,
         ),
         child: SafeArea(
           child: SingleChildScrollView(
@@ -199,25 +257,25 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                       horizontal: 14.0,
                     ),
                     decoration: BoxDecoration(
-                      color: _accentOrange.withValues(alpha: 0.25),
+                      color: _accentOrange.withValues(alpha: isNight ? 0.25 : 0.12),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
                         color: _accentBlue.withValues(alpha: 0.6),
                       ),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
-                        Icon(
+                        const Icon(
                           Icons.info_outline,
                           color: _accentBlue,
                           size: 20,
                         ),
-                        SizedBox(width: 10),
+                        const SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             'Modo Fallback: Archivo /data/wifi_config.json no detectado. Visualizando parámetros simulados.',
                             style: TextStyle(
-                              color: HeliosTheme.palladian,
+                              color: textPrimary,
                               fontSize: 12,
                               fontWeight: FontWeight.w500,
                             ),
@@ -229,14 +287,14 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                 Container(
                   padding: const EdgeInsets.all(22.0),
                   decoration: BoxDecoration(
-                    color: _cardColor,
+                    color: cardColor,
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
                       color: _accentBlue.withValues(alpha: 0.35),
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.2),
+                        color: Colors.black.withValues(alpha: isNight ? 0.2 : 0.05),
                         blurRadius: 10,
                         offset: const Offset(0, 4),
                       ),
@@ -248,10 +306,10 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
+                          Text(
                             'POTENCIA PICO INSTALADA',
                             style: TextStyle(
-                              color: _textMuted,
+                              color: textMuted,
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
                               letterSpacing: 1.2,
@@ -269,8 +327,8 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                           const SizedBox(height: 4),
                           Text(
                             'Capacidad teórica calculada: ${_serie * _paralelo} módulos conectados',
-                            style: const TextStyle(
-                              color: _textMuted,
+                            style: TextStyle(
+                              color: textMuted,
                               fontSize: 13,
                             ),
                           ),
@@ -295,10 +353,10 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text(
+                Text(
                   'Red y Comunicación',
                   style: TextStyle(
-                    color: HeliosTheme.palladian,
+                    color: textPrimary,
                     fontSize: 15,
                     fontWeight: FontWeight.bold,
                   ),
@@ -307,10 +365,10 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                 Container(
                   padding: const EdgeInsets.all(16.0),
                   decoration: BoxDecoration(
-                    color: _cardColor,
+                    color: cardColor,
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(
-                      color: HeliosTheme.oatmeal.withValues(alpha: 0.2),
+                      color: cardBorderColor,
                     ),
                   ),
                   child: Column(
@@ -323,17 +381,17 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
+                                Text(
                                   'SSID Conectado',
                                   style: TextStyle(
-                                    color: _textMuted,
+                                    color: textMuted,
                                     fontSize: 11,
                                   ),
                                 ),
                                 Text(
                                   _ssid,
-                                  style: const TextStyle(
-                                    color: HeliosTheme.palladian,
+                                  style: TextStyle(
+                                    color: textPrimary,
                                     fontSize: 14,
                                     fontWeight: FontWeight.bold,
                                   ),
@@ -365,17 +423,19 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                         ],
                       ),
                       Divider(
-                        color: HeliosTheme.oatmeal.withValues(alpha: 0.2),
+                        color: cardBorderColor,
                         height: 24,
                       ),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          _buildGatewayMeta('BROKER LOCAL', '127.0.0.1:1883'),
-                          _buildGatewayMeta('INTEROP', 'SunSpec Modbus RTU/TCP'),
+                          _buildGatewayMeta('BROKER LOCAL', '127.0.0.1:1883', textPrimary, textMuted),
+                          _buildGatewayMeta('INTEROP', 'SunSpec Modbus RTU/TCP', textPrimary, textMuted),
                           _buildGatewayMeta(
                             'GATEWAY STATUS',
                             'Online / Determinista',
+                            textPrimary,
+                            textMuted,
                           ),
                         ],
                       ),
@@ -383,10 +443,10 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text(
+                Text(
                   'Parámetros Eléctricos del Arreglo',
                   style: TextStyle(
-                    color: HeliosTheme.palladian,
+                    color: textPrimary,
                     fontSize: 15,
                     fontWeight: FontWeight.bold,
                   ),
@@ -406,44 +466,68 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                       '${_voc.toStringAsFixed(1)} V',
                       'Voc Total: ${totalVoc.toStringAsFixed(1)} V',
                       Icons.bolt,
+                      cardColor,
+                      cardBorderColor,
+                      textPrimary,
+                      textMuted,
                     ),
                     _buildArrayMetricCard(
                       'Corriente Cortocircuito',
                       '${_isc.toStringAsFixed(1)} A',
                       'Isc Total: ${totalIsc.toStringAsFixed(1)} A',
                       Icons.electric_meter,
+                      cardColor,
+                      cardBorderColor,
+                      textPrimary,
+                      textMuted,
                     ),
                     _buildArrayMetricCard(
                       'Módulos en Serie',
                       '$_serie paneles',
                       'Por cadena activa',
                       Icons.linear_scale,
+                      cardColor,
+                      cardBorderColor,
+                      textPrimary,
+                      textMuted,
                     ),
                     _buildArrayMetricCard(
                       'Cadenas en Paralelo',
                       '$_paralelo strings',
                       'Arreglo general',
                       Icons.view_column,
+                      cardColor,
+                      cardBorderColor,
+                      textPrimary,
+                      textMuted,
                     ),
                     _buildArrayMetricCard(
                       'Potencia Unitaria',
                       '${_wp.toInt()} Wp',
                       'Módulo Tier 1',
                       Icons.wb_sunny_outlined,
+                      cardColor,
+                      cardBorderColor,
+                      textPrimary,
+                      textMuted,
                     ),
                     _buildArrayMetricCard(
                       'Voltaje Estimado Vmp',
                       '${(totalVoc * 0.81).toStringAsFixed(1)} V',
                       'Punto de máxima potencia',
                       Icons.speed,
+                      cardColor,
+                      cardBorderColor,
+                      textPrimary,
+                      textMuted,
                     ),
                   ],
                 ),
                 const SizedBox(height: 24),
-                const Text(
+                Text(
                   'Acciones del Gateway',
                   style: TextStyle(
-                    color: HeliosTheme.palladian,
+                    color: textPrimary,
                     fontSize: 15,
                     fontWeight: FontWeight.bold,
                   ),
@@ -463,9 +547,9 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                           ),
                         ),
                         icon: const Icon(Icons.sync, color: _accentBlue),
-                        label: const Text(
+                        label: Text(
                           'Recargar Configuración',
-                          style: TextStyle(color: HeliosTheme.palladian),
+                          style: TextStyle(color: textPrimary),
                         ),
                         onPressed: _loadPlantConfiguration,
                       ),
@@ -476,7 +560,7 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                         style: ElevatedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 14),
                           backgroundColor: _accentOrange,
-                          foregroundColor: HeliosTheme.palladian,
+                          foregroundColor: Colors.white,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
                             side: const BorderSide(
@@ -490,7 +574,7 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                           'Forzar Modo Estiba',
                           style: TextStyle(fontWeight: FontWeight.bold),
                         ),
-                        onPressed: _showStowModeDialog,
+                        onPressed: () => _showStowModeDialog(context, isNight),
                       ),
                     ),
                   ],
@@ -504,14 +588,14 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
     );
   }
 
-  Widget _buildGatewayMeta(String label, String value) {
+  Widget _buildGatewayMeta(String label, String value, Color textPrimary, Color textMuted) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
-          style: const TextStyle(
-            color: _textMuted,
+          style: TextStyle(
+            color: textMuted,
             fontSize: 10,
             fontWeight: FontWeight.w600,
           ),
@@ -519,8 +603,8 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
         const SizedBox(height: 2),
         Text(
           value,
-          style: const TextStyle(
-            color: HeliosTheme.palladian,
+          style: TextStyle(
+            color: textPrimary,
             fontSize: 12,
             fontWeight: FontWeight.bold,
           ),
@@ -534,14 +618,18 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
     String mainValue,
     String subValue,
     IconData icon,
+    Color cardColor,
+    Color cardBorderColor,
+    Color textPrimary,
+    Color textMuted,
   ) {
     return Container(
       padding: const EdgeInsets.all(14.0),
       decoration: BoxDecoration(
-        color: _cardColor,
+        color: cardColor,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: HeliosTheme.oatmeal.withValues(alpha: 0.2),
+          color: cardBorderColor,
         ),
       ),
       child: Column(
@@ -554,8 +642,8 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
               Expanded(
                 child: Text(
                   title,
-                  style: const TextStyle(
-                    color: _textMuted,
+                  style: TextStyle(
+                    color: textMuted,
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
@@ -570,8 +658,8 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
             children: [
               Text(
                 mainValue,
-                style: const TextStyle(
-                  color: HeliosTheme.palladian,
+                style: TextStyle(
+                  color: textPrimary,
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                 ),
@@ -579,7 +667,7 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
               const SizedBox(height: 2),
               Text(
                 subValue,
-                style: const TextStyle(color: _textMuted, fontSize: 11),
+                style: TextStyle(color: textMuted, fontSize: 11),
               ),
             ],
           ),

@@ -4,31 +4,72 @@ import os
 import time
 import threading
 import paho.mqtt.client as mqtt
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 DB_PATH = "/data/helios_history.db"
+TZ_OFFSET = timezone(timedelta(hours=-6))
 
 # Estado compartido en memoria
 state = {
-    "p_exp":           0.0,
-    "is_night":        True,
-    "last_inverter_ts": 0.0,   # epoch del último mensaje de inversor
-    "last_alert_code": None,   # último código de alerta persistido (anti-duplicado)
+    "p_exp":            0.0,
+    "is_night":         True,
+    "last_inverter_ts": 0.0,    # epoch del último mensaje de inversor
+    "last_alert_code":  None,   # último código de alerta persistido (anti-duplicado consecutivo)
 }
 
+def get_now_str():
+    """Retorna fecha y hora actual en UTC-6 en formato 'YYYY-MM-DD HH:MM:SS'."""
+    return datetime.now(TZ_OFFSET).strftime("%Y-%m-%d %H:%M:%S")
+
 def init_db():
-    """Crea las tablas si no existen y asigna permisos 666."""
-    os.makedirs('/data', exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS telemetry_log
-                 (timestamp TEXT, p_real REAL, p_exp REAL, v_real REAL, i_real REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS scada_errors
-                 (timestamp TEXT, fault_code INTEGER, description TEXT)''')
-    conn.commit()
-    conn.close()
-    os.chmod(DB_PATH, 0o666)
-    print("[INFO] Base de datos SQLite inicializada con permisos 666.")
+    """
+    Crea las tablas si no existen, migra columnas si es necesario y asigna permisos 666.
+    Garantiza el esquema unificado:
+    scada_errors (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, code INTEGER, description TEXT)
+    """
+    try:
+        os.makedirs('/data', exist_ok=True)
+    except Exception:
+        pass
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS telemetry_log
+                     (timestamp TEXT, p_real REAL, p_exp REAL, v_real REAL, i_real REAL)''')
+
+        # Inspeccionar tabla scada_errors para migración
+        c.execute("PRAGMA table_info(scada_errors)")
+        columns = [row[1] for row in c.fetchall()]
+
+        if not columns:
+            # Crear tabla desde cero con autoincrement y columna 'code'
+            c.execute('''CREATE TABLE scada_errors
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, code INTEGER, description TEXT)''')
+            print("[INFO] Tabla scada_errors creada con esquema unificado.")
+        elif 'fault_code' in columns and 'code' not in columns:
+            print("[INFO] Migrando tabla scada_errors: renombrando 'fault_code' -> 'code'...")
+            try:
+                c.execute("ALTER TABLE scada_errors RENAME COLUMN fault_code TO code")
+            except Exception:
+                # Fallback para versiones de SQLite sin ALTER TABLE RENAME COLUMN
+                c.execute('''CREATE TABLE scada_errors_v2
+                             (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, code INTEGER, description TEXT)''')
+                c.execute("INSERT INTO scada_errors_v2 (timestamp, code, description) SELECT timestamp, fault_code, description FROM scada_errors")
+                c.execute("DROP TABLE scada_errors")
+                c.execute("ALTER TABLE scada_errors_v2 RENAME TO scada_errors")
+            print("[INFO] Migración completada exitosamente.")
+
+        conn.commit()
+        conn.close()
+
+        try:
+            os.chmod(DB_PATH, 0o666)
+        except Exception:
+            pass
+        print("[INFO] Base de datos SQLite inicializada correctamente con permisos 666.")
+    except Exception as e:
+        print(f"[ERROR] init_db: {e}")
 
 def insert_telemetry(now, p_real, p_exp, v_real, i_real):
     try:
@@ -43,18 +84,23 @@ def insert_telemetry(now, p_real, p_exp, v_real, i_real):
         print(f"[ERROR] insert_telemetry: {e}")
 
 def insert_alert(now, code, description):
-    """Inserta en scada_errors evitando duplicados consecutivos del mismo código."""
+    """
+    Inserta en scada_errors evitando duplicados consecutivos del mismo código.
+    Guarda timestamp en UTC-6 (YYYY-MM-DD HH:MM:SS), code numérico y descripción.
+    """
     if state["last_alert_code"] == code:
-        return   # No saturar la tabla repitiendo el mismo error cada 10 s
+        return  # No saturar la tabla repitiendo el mismo error cada pocos segundos
+
     state["last_alert_code"] = code
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
-            "INSERT INTO scada_errors VALUES (?,?,?)",
-            (now, code, description)
+            "INSERT INTO scada_errors (timestamp, code, description) VALUES (?,?,?)",
+            (now, int(code), str(description))
         )
         conn.commit()
         conn.close()
+        print(f"[HeliOs Logger] Evento de Falla guardado en SQLite: Código {code} - {description} [{now}]")
     except Exception as e:
         print(f"[ERROR] insert_alert: {e}")
 
@@ -72,7 +118,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 def on_message(client, userdata, msg):
     topic = msg.topic
-    now   = datetime.now().isoformat()
+    now = get_now_str()
 
     try:
         data = json.loads(msg.payload.decode('utf-8'))
@@ -82,22 +128,34 @@ def on_message(client, userdata, msg):
 
     # --- Actualizar estado SPA ---
     if topic == "helios/spa/expected":
-        state["p_exp"]    = float(data.get("p_exp",    0.0))
-        state["is_night"] = bool(data.get("is_night",  True))
+        state["p_exp"] = float(data.get("p_exp", 0.0))
+        state["is_night"] = bool(data.get("is_night", True))
         return
 
-    # --- Telemetría del inversor → persistir en telemetry_log ---
+    # --- Telemetría del inversor → persistir en telemetry_log y auditar fallas ---
     if topic == "helios/inverter/telemetry":
         p_real = float(data.get("power_w", 0.0))
         v_real = float(data.get("v_dc",    0.0))
         i_real = float(data.get("i_dc",    0.0))
-        fault  = int(data.get("fault",     0))
+        fault = int(data.get("fault", 0))
 
         insert_telemetry(now, p_real, state["p_exp"], v_real, i_real)
 
-        # Registrar fallas hardware SunSpec en scada_errors
+        # Registrar fallas de inversor SunSpec directamente si fault != 0
         if fault != 0:
-            insert_alert(now, fault, f"Falla SunSpec código {fault}")
+            sunspec_names = {
+                1: "Sobrevoltaje de Red",
+                13: "Fuga a Tierra Detectada",
+                14: "Sobrecalentamiento del Inversor",
+                101: "Pérdida de Panel en Serie",
+                102: "Sombreo o Suciedad en Arreglo",
+                103: "Alerta Térmica: Sobrecalentamiento (>65°C)",
+            }
+            desc = sunspec_names.get(fault, f"Falla Inversor SunSpec código {fault}")
+            insert_alert(now, fault, desc)
+        elif state["last_alert_code"] == fault:
+            # Reseteo de alerta si volvió a 0
+            state["last_alert_code"] = None
 
         state["last_inverter_ts"] = time.time()
         return
@@ -124,7 +182,7 @@ def autonomous_telemetry_loop(mqtt_client):
         elapsed_since_inverter = time.time() - state["last_inverter_ts"]
         p_exp = state["p_exp"]
         if elapsed_since_inverter > 15.0 and p_exp > 0:
-            now = datetime.now().isoformat()
+            now = get_now_str()
             insert_telemetry(now, 0.0, p_exp, 0.0, 0.0)
 
 if __name__ == "__main__":
@@ -133,7 +191,15 @@ if __name__ == "__main__":
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect
     client.on_message = on_message
-    client.connect("127.0.0.1", 1883, 60)
+
+    # Reconexión resiliente en el arranque
+    while True:
+        try:
+            client.connect("127.0.0.1", 1883, 60)
+            break
+        except Exception as e:
+            print(f"[HeliOs Logger] Esperando broker MQTT: {e}")
+            time.sleep(2)
 
     # Hilo de telemetría autónoma (curva esperada sin inversor)
     t = threading.Thread(target=autonomous_telemetry_loop, args=(client,), daemon=True)

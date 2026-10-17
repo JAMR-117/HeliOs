@@ -29,19 +29,18 @@ class ScadaErrorsScreen extends StatefulWidget {
 
 class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
   static const String _dbPath = '/data/helios_history.db';
-  List<ScadaErrorRecord> _errorLogs = [];
+  List<ScadaErrorRecord> _dbErrorLogs = [];
   bool _isLoading = false;
   Timer? _refreshTimer;
 
-  static const Color _cardColor = HeliosTheme.blueFantastic;
-  static const Color _textMuted = HeliosTheme.oatmeal;
+  static const Color _accentOrange = HeliosTheme.truffleTrouble;
   static const Color _accentBlue = HeliosTheme.burningFlame;
 
   @override
   void initState() {
     super.initState();
     _loadHistoricalErrors();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _loadHistoricalErrors();
     });
   }
@@ -60,40 +59,61 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
       db = await openAppDatabase(_dbPath);
 
       if (db == null) {
-        // DB no existe aún — estado limpio sin datos mock
-        setState(() {
-          _errorLogs = [];
-          _isLoading = false;
-        });
+        if (mounted) {
+          setState(() {
+            _dbErrorLogs = [];
+            _isLoading = false;
+          });
+        }
         return;
       }
 
-      final sql.ResultSet resultSet = db.select(
-        'SELECT timestamp, code, description FROM scada_errors ORDER BY timestamp DESC;',
-      );
-
-      final List<ScadaErrorRecord> loaded = [];
-      for (final sql.Row row in resultSet) {
-        loaded.add(
-          ScadaErrorRecord(
-            timestamp: row['timestamp']?.toString() ?? '--',
-            code: (row['code'] as num?)?.toInt() ?? 0,
-            description:
-                row['description']?.toString() ?? 'Falla no especificada',
-          ),
+      sql.ResultSet? resultSet;
+      try {
+        resultSet = db.select(
+          'SELECT timestamp, code, description FROM scada_errors ORDER BY id DESC, timestamp DESC LIMIT 100;',
         );
+      } catch (_) {
+        try {
+          resultSet = db.select(
+            'SELECT timestamp, code, description FROM scada_errors ORDER BY timestamp DESC LIMIT 100;',
+          );
+        } catch (_) {
+          try {
+            resultSet = db.select(
+              'SELECT timestamp, fault_code AS code, description FROM scada_errors ORDER BY timestamp DESC LIMIT 100;',
+            );
+          } catch (_) {}
+        }
       }
 
-      setState(() {
-        _errorLogs = loaded;
-        _isLoading = false;
-      });
+      final List<ScadaErrorRecord> loaded = [];
+      if (resultSet != null) {
+        for (final sql.Row row in resultSet) {
+          loaded.add(
+            ScadaErrorRecord(
+              timestamp: row['timestamp']?.toString() ?? '--',
+              code: (row['code'] as num?)?.toInt() ?? 0,
+              description:
+                  row['description']?.toString() ?? 'Falla no especificada',
+            ),
+          );
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _dbErrorLogs = loaded;
+          _isLoading = false;
+        });
+      }
     } catch (_) {
-      // Error de lectura — estado limpio
-      setState(() {
-        _errorLogs = [];
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _dbErrorLogs = [];
+          _isLoading = false;
+        });
+      }
     } finally {
       db?.dispose();
     }
@@ -102,7 +122,7 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
   Color _getSeverityColor(int code) {
     if (code == 13 || code == 20 || code == 21 || code == 32) {
       return HeliosTheme.truffleTrouble;
-    } else if (code == 14 || code == 1 || code == 2) {
+    } else if (code == 14 || code == 1 || code == 2 || code >= 100) {
       return HeliosTheme.burningFlame;
     }
     return HeliosTheme.oatmeal;
@@ -132,20 +152,59 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
         scada['description'] as String? ?? 'Operación Normal';
     final bool hasActiveAlarm = activeCode != 0;
 
+    final bool isNight = mqttService.isNight;
+
+    // Paleta homogénea: Día (Claro) vs Noche (Oscuro)
+    final Color bgColor = isNight ? const Color(0xFF131B2A) : const Color(0xFFF1F5F9);
+    final Gradient? bgGradient = isNight ? HeliosTheme.nightBackgroundGradient : null;
+    final Color cardColor = isNight ? const Color(0xFF1E293B) : Colors.white;
+    final Color cardBorderColor = isNight
+        ? HeliosTheme.oatmeal.withValues(alpha: 0.2)
+        : const Color(0xFFE2E8F0);
+    final Color textPrimary = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+    final Color textMuted = isNight ? HeliosTheme.oatmeal : const Color(0xFF475569);
+    final Color appBarItemColor = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+
+    // Fusión de errores SQLite con los errores capturados en memoria durante la sesión
+    final List<ScadaErrorRecord> combinedLogs = [];
+    final Set<String> seen = {};
+
+    // 1. Agregar errores de sesión en tiempo real (más recientes primero)
+    for (final err in mqttService.sessionErrors) {
+      final String ts = err['timestamp']?.toString() ?? '';
+      final int c = (err['code'] as num?)?.toInt() ?? 0;
+      final String d = err['description']?.toString() ?? 'Alerta SCADA';
+      final String key = '$ts-$c';
+      if (!seen.contains(key)) {
+        seen.add(key);
+        combinedLogs.add(ScadaErrorRecord(timestamp: ts, code: c, description: d));
+      }
+    }
+
+    // 2. Agregar registros históricos de SQLite
+    for (final rec in _dbErrorLogs) {
+      final String key = '${rec.timestamp}-${rec.code}';
+      if (!seen.contains(key)) {
+        seen.add(key);
+        combinedLogs.add(rec);
+      }
+    }
+
     return Container(
-      decoration: const BoxDecoration(
-        gradient: HeliosTheme.nightBackgroundGradient,
+      decoration: BoxDecoration(
+        color: bgColor,
+        gradient: bgGradient,
       ),
       child: Scaffold(
         backgroundColor: Colors.transparent,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,
-          leading: const BackButton(color: HeliosTheme.palladian),
-          title: const Text(
+          leading: BackButton(color: appBarItemColor),
+          title: Text(
             'Bitácora de Errores SCADA',
             style: TextStyle(
-              color: HeliosTheme.palladian,
+              color: appBarItemColor,
               fontWeight: FontWeight.bold,
               letterSpacing: 1.2,
             ),
@@ -181,18 +240,18 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                       padding: const EdgeInsets.all(16.0),
                       decoration: BoxDecoration(
                         color: hasActiveAlarm
-                            ? HeliosTheme.truffleTrouble.withValues(alpha: 0.35)
-                            : _cardColor,
+                            ? _accentOrange.withValues(alpha: isNight ? 0.35 : 0.15)
+                            : cardColor,
                         borderRadius: BorderRadius.circular(16),
                         border: Border.all(
                           color: hasActiveAlarm
-                              ? HeliosTheme.truffleTrouble
-                              : HeliosTheme.oatmeal.withValues(alpha: 0.2),
-                          width: 1.5,
+                              ? _accentOrange
+                              : cardBorderColor,
+                          width: hasActiveAlarm ? 1.8 : 1.0,
                         ),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.2),
+                            color: Colors.black.withValues(alpha: isNight ? 0.2 : 0.05),
                             blurRadius: 8,
                             offset: const Offset(0, 3),
                           ),
@@ -205,8 +264,8 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                                 ? Icons.warning_amber_rounded
                                 : Icons.check_circle_outline,
                             color: hasActiveAlarm
-                                ? HeliosTheme.truffleTrouble
-                                : HeliosTheme.burningFlame,
+                                ? _accentOrange
+                                : const Color(0xFF10B981),
                             size: 34,
                           ),
                           const SizedBox(width: 12),
@@ -214,10 +273,10 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
+                                Text(
                                   'Falla Activa Actual',
                                   style: TextStyle(
-                                    color: _textMuted,
+                                    color: textMuted,
                                     fontSize: 12,
                                   ),
                                 ),
@@ -228,8 +287,8 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                                       : 'SIN ALARMAS ACTIVAS',
                                   style: TextStyle(
                                     color: hasActiveAlarm
-                                        ? HeliosTheme.burningFlame
-                                        : HeliosTheme.palladian,
+                                        ? (isNight ? HeliosTheme.burningFlame : const Color(0xFFDC2626))
+                                        : textPrimary,
                                     fontWeight: FontWeight.bold,
                                     fontSize: 14,
                                   ),
@@ -248,15 +307,15 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                     child: Container(
                       padding: const EdgeInsets.all(16.0),
                       decoration: BoxDecoration(
-                        color: _cardColor,
+                        color: cardColor,
                         borderRadius: BorderRadius.circular(16),
                         border: Border.all(
-                          color: HeliosTheme.oatmeal.withValues(alpha: 0.2),
+                          color: cardBorderColor,
                           width: 1,
                         ),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.2),
+                            color: Colors.black.withValues(alpha: isNight ? 0.2 : 0.05),
                             blurRadius: 8,
                             offset: const Offset(0, 3),
                           ),
@@ -265,15 +324,15 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
+                          Text(
                             'Total de Eventos',
-                            style: TextStyle(color: _textMuted, fontSize: 12),
+                            style: TextStyle(color: textMuted, fontSize: 12),
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            '${_errorLogs.length}',
-                            style: const TextStyle(
-                              color: HeliosTheme.palladian,
+                            '${combinedLogs.length}',
+                            style: TextStyle(
+                              color: textPrimary,
                               fontWeight: FontWeight.bold,
                               fontSize: 24,
                             ),
@@ -284,128 +343,127 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                   ),
                 ],
               ),
-            const SizedBox(height: 18),
-            const Text(
-              'Histórico de Alarmas Registradas',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 15,
-                fontWeight: FontWeight.bold,
+              const SizedBox(height: 18),
+              Text(
+                'Histórico de Alarmas Registradas',
+                style: TextStyle(
+                  color: textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
-            ),
-            const SizedBox(height: 10),
-            Expanded(
-              child: _errorLogs.isEmpty
-                  ? Center(
-                      child: Container(
-                        padding: const EdgeInsets.all(32.0),
-                        decoration: BoxDecoration(
-                          color: _cardColor,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.inventory_2_outlined,
-                              color: _textMuted,
-                              size: 48,
-                            ),
-                            SizedBox(height: 12),
-                            Text(
-                              'Esperando registros históricos en base de datos...',
-                              style: TextStyle(
-                                color: _textMuted,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ),
-                      ),
-                    )
-                  : ListView.separated(
-                      itemCount: _errorLogs.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 8),
-                      itemBuilder: (context, index) {
-                        final record = _errorLogs[index];
-                        final severityColor = _getSeverityColor(record.code);
-
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16.0,
-                            vertical: 12.0,
-                          ),
+              const SizedBox(height: 10),
+              Expanded(
+                child: combinedLogs.isEmpty
+                    ? Center(
+                        child: Container(
+                          padding: const EdgeInsets.all(32.0),
                           decoration: BoxDecoration(
-                            color: _cardColor,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border(
-                              left: BorderSide(color: severityColor, width: 4),
-                            ),
+                            color: cardColor,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: cardBorderColor),
                           ),
-                          child: Row(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: severityColor.withValues(alpha: 0.18),
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: severityColor.withValues(alpha: 0.4),
-                                  ),
-                                ),
-                                child: Text(
-                                  'CÓDIGO ${record.code}',
-                                  style: TextStyle(
-                                    color: severityColor,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 14),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      record.description,
-                                      style: const TextStyle(
-                                        color: HeliosTheme.palladian,
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      _formatTimestamp(record.timestamp),
-                                      style: const TextStyle(
-                                        color: _textMuted,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
                               Icon(
-                                Icons.chevron_right,
-                                color: _textMuted.withValues(alpha: 0.5),
+                                Icons.inventory_2_outlined,
+                                color: textMuted,
+                                size: 48,
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                'Sin fallas registradas en la bitácora.',
+                                style: TextStyle(
+                                  color: textMuted,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                                textAlign: TextAlign.center,
                               ),
                             ],
                           ),
-                        );
-                      },
-                    ),
-            ),
-            const SizedBox(height: 12),
-          ],
+                        ),
+                      )
+                    : ListView.separated(
+                        itemCount: combinedLogs.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final record = combinedLogs[index];
+                          final severityColor = _getSeverityColor(record.code);
+
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16.0,
+                              vertical: 12.0,
+                            ),
+                            decoration: BoxDecoration(
+                              color: cardColor,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: cardBorderColor),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: severityColor.withValues(alpha: isNight ? 0.18 : 0.12),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: severityColor.withValues(alpha: 0.4),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    'CÓDIGO ${record.code}',
+                                    style: TextStyle(
+                                      color: severityColor,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        record.description,
+                                        style: TextStyle(
+                                          color: textPrimary,
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        _formatTimestamp(record.timestamp),
+                                        style: TextStyle(
+                                          color: textMuted,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Icon(
+                                  Icons.chevron_right,
+                                  color: textMuted.withValues(alpha: 0.5),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
         ),
       ),
-    ),
-  );
-}
+    );
+  }
 }

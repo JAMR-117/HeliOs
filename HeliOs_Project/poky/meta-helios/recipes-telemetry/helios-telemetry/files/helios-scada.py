@@ -1,10 +1,15 @@
 import json
 import sqlite3
 import os
+import time
 import paho.mqtt.client as mqtt
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 DB_PATH = "/data/helios_history.db"
+TZ_OFFSET = timezone(timedelta(hours=-6))
+
+def get_now_str():
+    return datetime.now(TZ_OFFSET).strftime("%Y-%m-%d %H:%M:%S")
 
 SUNSPEC_ERRORS = {
     0:   "Operación Normal",
@@ -20,27 +25,34 @@ SUNSPEC_ERRORS = {
 latest_spa = {"ghi": 0.0, "v_exp": 0.0, "p_exp": 0.0, "is_night": True}
 
 def init_db():
-    os.makedirs('/data', exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS telemetry_log
-                 (timestamp TEXT, p_real REAL, p_exp REAL, v_real REAL, i_real REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS scada_errors
-                 (timestamp TEXT, fault_code INTEGER, description TEXT)''')
-    conn.commit()
-    conn.close()
     try:
-        os.chmod(DB_PATH, 0o666)
+        os.makedirs('/data', exist_ok=True)
     except Exception:
         pass
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS telemetry_log
+                     (timestamp TEXT, p_real REAL, p_exp REAL, v_real REAL, i_real REAL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS scada_errors
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, code INTEGER, description TEXT)''')
+        conn.commit()
+        conn.close()
+        try:
+            os.chmod(DB_PATH, 0o666)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[ERROR] helios-scada init_db: {e}")
 
 def guardar_alerta(timestamp, code, description):
     """Inserta una alerta en SQLite para que ScadaErrorsScreen la muestre en historial."""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("INSERT INTO scada_errors VALUES (?,?,?)",
-                  (timestamp, code, description))
+        c.execute("INSERT INTO scada_errors (timestamp, code, description) VALUES (?,?,?)",
+                  (timestamp, int(code), str(description)))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -59,7 +71,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 def on_message(client, userdata, msg):
     global latest_spa
-    now_str = datetime.now().isoformat()
+    now_str = get_now_str()
 
     try:
         data = json.loads(msg.payload.decode('utf-8'))
@@ -139,9 +151,18 @@ def on_message(client, userdata, msg):
         }
         client.publish("helios/scada/alerts", json.dumps(estado), retain=True)
 
-init_db()
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-client.on_connect = on_connect
-client.on_message = on_message
-client.connect("127.0.0.1", 1883, 60)
-client.loop_forever()
+if __name__ == "__main__":
+    init_db()
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    while True:
+        try:
+            client.connect("127.0.0.1", 1883, 60)
+            break
+        except Exception as e:
+            print(f"[helios-scada] Esperando broker MQTT: {e}")
+            time.sleep(2)
+
+    client.loop_forever()

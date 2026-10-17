@@ -27,6 +27,8 @@ if "spa_data" not in st.session_state:
     st.session_state["spa_data"] = {}
 if "last_rpi_ip" not in st.session_state:
     st.session_state["last_rpi_ip"] = "192.168.1.64"
+if "yield_kwh" not in st.session_state:
+    st.session_state["yield_kwh"] = 125.40
 
 # Diccionario SunSpec para interfaz manual
 SUNSPEC_ERRORS = {
@@ -36,13 +38,13 @@ SUNSPEC_ERRORS = {
     14: "14: Sobrecalentamiento del Inversor",
 }
 
-# Fallback de configuración de paneles (igual que helios-spa.py)
+# Fallback de configuración de paneles
 PANEL_FALLBACK = {
-    "voc": 45.5, "isc": 10.8, "wp": 450.0,
-    "serie": 4, "paralelo": 1,
+    "voc": 49.6, "isc": 14.0, "wp": 550.0,
+    "serie": 18, "paralelo": 4,
     "latitud": 19.68, "longitud": -99.01,
 }
-TZ_MEXICO = 'America/Mexico_City'
+TZ_OFFSET = timezone(timedelta(hours=-6))
 
 # ===========================================================
 # CLIENTE MQTT PERSISTENTE
@@ -112,10 +114,10 @@ def publish_inverter_telemetry(ip: str, payload: dict):
 # CÁLCULO LOCAL DE IRRADIANCIA (fallback si no hay broker)
 # ===========================================================
 def calcular_ghi_local():
-    """Cálculo astronómico local con hora de México UTC-6."""
-    now = pd.Timestamp(datetime.now(timezone(timedelta(hours=-6))))
+    """Cálculo astronómico local con hora de México UTC-6 sin dependencias externas."""
+    now = pd.Timestamp(datetime.now(TZ_OFFSET))
     loc = pvlib.location.Location(
-        PANEL_FALLBACK["latitud"], PANEL_FALLBACK["longitud"], tz=TZ_MEXICO
+        PANEL_FALLBACK["latitud"], PANEL_FALLBACK["longitud"], tz=-6
     )
     cs  = loc.get_clearsky(pd.DatetimeIndex([now]))
     return float(cs['ghi'].iloc[0])
@@ -155,7 +157,7 @@ modo = st.radio(
 # ===========================================================
 if modo == "Modo Automático Continuo (Clear Sky)":
     st.info(
-        "Simula el inversor publicando en `helios/inverter/telemetry` al ~96 %% "
+        "Simula el inversor publicando en `helios/inverter/telemetry` al ~96 % "
         "de los valores esperados por la Raspberry Pi, cada 2 segundos."
     )
 
@@ -201,20 +203,26 @@ if modo == "Modo Automático Continuo (Clear Sky)":
         i_dc    = 0.0
         power_w = 0.0
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Potencia Sim. (W)",  f"{power_w} W",
                 delta=f"Esp: {round(p_exp, 0)} W")
     col2.metric("Voltaje DC Sim.",    f"{v_dc} V",
                 delta=f"Esp: {round(v_exp, 1)} V")
     col3.metric("Corriente DC Sim.",  f"{i_dc} A",
                 delta=f"Esp: {round(i_exp, 2)} A")
+    col4.metric("Energía Acum.",      f"{st.session_state['yield_kwh']:.2f} kWh",
+                delta="Dinámico")
 
     if is_night:
         st.info("🌙 Modo Nocturno — Enviando 0 W, 0 V, 0 A al broker.")
 
     if simulacion_activa:
-        temp_c    = round(25.0 + (ghi / 1000.0) * 35.0, 1) if ghi > 0 else 25.0
-        yield_kwh = round(power_w * (2 / 3_600_000.0), 4)
+        temp_c = round(25.0 + (ghi / 1000.0) * 35.0, 1) if ghi > 0 else 25.0
+        
+        # Incremento acumulativo visible para demostración de tesis
+        if power_w > 0:
+            incremento = (power_w * (2.0 / 3600.0) / 1000.0) + 0.01
+            st.session_state["yield_kwh"] = round(st.session_state["yield_kwh"] + incremento, 2)
 
         payload = {
             "inverter":  1,
@@ -222,14 +230,14 @@ if modo == "Modo Automático Continuo (Clear Sky)":
             "i_dc":      i_dc,
             "power_w":   power_w,
             "temp_c":    temp_c,
-            "yield_kwh": yield_kwh,
+            "yield_kwh": round(st.session_state["yield_kwh"], 2),
             "fault":     0,
         }
 
         success, msg_txt = publish_inverter_telemetry(rpi_ip, payload)
 
         if success:
-            st.toast("📡 Telemetría de inversor transmitida.", icon="✅")
+            st.toast(f"📡 Telemetría enviada: {power_w} W | {st.session_state['yield_kwh']:.2f} kWh", icon="✅")
         else:
             st.error(msg_txt)
 
@@ -246,8 +254,8 @@ else:
     )
     st.session_state["simulacion_activa"] = False
 
-    v_dc    = st.slider("Voltaje DC (V)",   min_value=0.0, max_value=600.0, value=450.0, step=0.1)
-    i_dc    = st.slider("Corriente DC (A)", min_value=0.0, max_value=20.0,  value=9.5,   step=0.1)
+    v_dc = st.slider("Voltaje DC (V)",   min_value=0.0, max_value=600.0, value=450.0, step=0.1)
+    i_dc = st.slider("Corriente DC (A)", min_value=0.0, max_value=20.0,  value=9.5,   step=0.1)
     power_w = round(v_dc * i_dc, 2)
 
     st.info(f"⚡ Potencia Activa Resultante: **{power_w} W**")
@@ -264,22 +272,34 @@ else:
         "Temperatura DC (°C)", min_value=20.0, max_value=90.0, value=45.0, step=0.5
     )
 
-    payload = {
-        "inverter":  1,
-        "v_dc":      v_dc,
-        "i_dc":      i_dc,
-        "power_w":   power_w,
-        "temp_c":    temp_c_manual,
-        "yield_kwh": 0.0,
-        "fault":     int(falla_seleccionada),
-    }
+    kwh_manual = st.number_input(
+        "Energía Acumulada (kWh) - Ajustable",
+        min_value=0.0,
+        max_value=100000.0,
+        value=float(st.session_state["yield_kwh"]),
+        step=0.1,
+    )
+    st.session_state["yield_kwh"] = round(kwh_manual, 2)
 
-    if st.button("🚀 Publicar Falla Manual", type="primary", use_container_width=True):
+    if st.button("🚀 Publicar Falla Manual / Telemetría", type="primary", use_container_width=True):
+        # En cada envío manual sumamos un incremento acumulativo
+        st.session_state["yield_kwh"] = round(st.session_state["yield_kwh"] + 0.05, 2)
+
+        payload = {
+            "inverter":  1,
+            "v_dc":      v_dc,
+            "i_dc":      i_dc,
+            "power_w":   power_w,
+            "temp_c":    temp_c_manual,
+            "yield_kwh": round(st.session_state["yield_kwh"], 2),
+            "fault":     int(falla_seleccionada),
+        }
+
         success, msg_txt = publish_inverter_telemetry(rpi_ip, payload)
         if success:
             st.success(
-                "Trama SunSpec inyectada. "
-                "Revisa el historial SQLite en la Raspberry Pi."
+                f"Trama SunSpec inyectada: Falla {falla_seleccionada} | {power_w} W | {st.session_state['yield_kwh']:.2f} kWh. "
+                "Revisa la HMI y el historial SQLite en la Raspberry Pi."
             )
         else:
             st.error(msg_txt)

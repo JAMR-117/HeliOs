@@ -6,11 +6,14 @@ import time
 import urllib.request
 import subprocess
 import email.utils
+import traceback
+import os
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 
 # ---------------------------------------------------------
 # 1. BYPASS DEFINITIVO DE DEPENDENCIAS PESADAS (MOCKING)
+# REGLA DE ORO: MANTENER INTACTO EL SISTEMA PaqueteFantasma
 # ---------------------------------------------------------
 sys.modules['h5py'] = MagicMock()
 
@@ -48,203 +51,305 @@ import pvlib
 import paho.mqtt.client as mqtt
 
 # ---------------------------------------------------------
-# 2. ZONA HORARIA FIJA DE MÉXICO (UTC-6) — SIN depender de /etc/localtime
+# 2. ZONA HORARIA Y UBICACIÓN BLINDADAS (SIN DEPENDER DE tzdata)
 # ---------------------------------------------------------
-TZ_MEXICO_OFFSET = timezone(timedelta(hours=-6))   # objeto timedelta puro
-TZ_MEXICO_STR    = 'Etc/GMT+6'                     # string para pvlib/pandas
+# Offset matemático infalible de -6 horas (México Central / UTC-6)
+TZ_OFFSET = timezone(timedelta(hours=-6))
+
+# Caché de ubicación geográfica para no bloquear el bucle si no hay red
+LOCATION_CACHE = {
+    "lat": 19.68,
+    "lon": -99.01,
+    "synced": False
+}
+
+def get_location_coordinates(conf):
+    """
+    Obtiene coordenadas geográficas de forma resiliente:
+    1. Si wifi_config.json tiene latitud/longitud válidas.
+    2. Si no, intenta consultar ip-api.com con timeout=3s una sola vez y lo guarda en caché.
+    3. Si falla o no hay conexión, fallback a Ojo de Agua, EdoMex (19.68, -99.01).
+    """
+    try:
+        lat = float(conf.get("latitud") or conf.get("lat") or 0.0)
+        lon = float(conf.get("longitud") or conf.get("lon") or 0.0)
+        if lat != 0.0 and lon != 0.0:
+            LOCATION_CACHE["lat"] = lat
+            LOCATION_CACHE["lon"] = lon
+            LOCATION_CACHE["synced"] = True
+            return lat, lon
+    except Exception:
+        pass
+
+    if LOCATION_CACHE["synced"]:
+        return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"]
+
+    try:
+        req = urllib.request.Request(
+            "http://ip-api.com/json/",
+            headers={"User-Agent": "HeliOs-SPA/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if data.get("status") == "success":
+                lat = float(data.get("lat", 19.68))
+                lon = float(data.get("lon", -99.01))
+                LOCATION_CACHE["lat"] = lat
+                LOCATION_CACHE["lon"] = lon
+                LOCATION_CACHE["synced"] = True
+                print(f"[HeliOs SPA] Coordenadas obtenidas via IP: lat={lat}, lon={lon}")
+                return lat, lon
+    except Exception as e:
+        print(f"[HeliOs SPA] Fallback a coordenadas por defecto (19.68, -99.01): {e}")
+
+    return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"]
 
 # ---------------------------------------------------------
 # 3. SINCRONIZACIÓN DE RELOJ POR HTTP
 # ---------------------------------------------------------
 def sync_system_clock_if_needed():
     """
-    Intenta sincronizar el reloj del sistema via header HTTP Date de Google.
-    Retorna True si el reloj fue actualizado (para regenerar el pronóstico
-    inmediatamente).  No lanza excepciones.
+    Intenta sincronizar el reloj del sistema via header HTTP Date de Google o ip-api.
+    Retorna True si el reloj fue actualizado. No lanza excepciones.
     """
-    try:
-        now_year = datetime.now(timezone.utc).year
-        if now_year >= 2026:
-            return False   # El reloj ya parece correcto
-        resp = urllib.request.urlopen('http://www.google.com', timeout=5)
-        date_header = resp.headers.get('Date', '')
-        if not date_header:
-            return False
-        dt = email.utils.parsedate_to_datetime(date_header)
-        date_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-        subprocess.run(['date', '-u', '-s', date_str], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"[HeliOs SPA] Reloj sincronizado a {date_str} UTC")
-        return True
-    except Exception as e:
-        print(f"[HeliOs SPA] No se pudo sincronizar reloj: {e}")
-        return False
+    urls_to_try = [
+        ('http://www.google.com', 3),
+        ('http://ip-api.com/json/', 3)
+    ]
+    for url, t_out in urls_to_try:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "HeliOs-ClockSync/1.0"})
+            with urllib.request.urlopen(req, timeout=t_out) as resp:
+                date_header = resp.headers.get('Date', '')
+                if date_header:
+                    dt = email.utils.parsedate_to_datetime(date_header)
+                    date_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    subprocess.run(
+                        ['date', '-u', '-s', date_str],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    print(f"[HeliOs SPA] Reloj sincronizado exitosamente a {date_str} UTC via {url}")
+                    return True
+        except Exception:
+            continue
+    return False
 
 # ---------------------------------------------------------
 # 4. LECTURA DE CONFIGURACIÓN DE PANELES
 # ---------------------------------------------------------
 def read_panel_config():
-    """Lee los datos desde la red de aprovisionamiento de HeliOs."""
+    """
+    Lee los datos desde /data/wifi_config.json con valores seguros por defecto.
+    Valores por defecto de planta: voc: 49.6, isc: 14.0, wp: 550.0, serie: 18, paralelo: 4.
+    """
+    defaults = {
+        "voc": 49.6,
+        "isc": 14.0,
+        "wp": 550.0,
+        "serie": 18,
+        "paralelo": 4,
+        "latitud": 19.68,
+        "longitud": -99.01
+    }
     try:
-        with open('/data/wifi_config.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {
-            "voc": 45.0, "isc": 9.0, "wp": 550.0,
-            "serie": 10, "paralelo": 2,
-            "latitud": 19.68, "longitud": -99.01
-        }
+        if os.path.exists('/data/wifi_config.json'):
+            with open('/data/wifi_config.json', 'r') as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    for k, v in defaults.items():
+                        if k not in loaded or loaded[k] is None or loaded[k] == 0:
+                            loaded[k] = v
+                    return loaded
+    except Exception as e:
+        print(f"[HeliOs SPA] Error leyendo /data/wifi_config.json: {e}")
+    return defaults
 
 # ---------------------------------------------------------
-# 5. GENERACIÓN DEL PRONÓSTICO 10 DÍAS
+# 5. GENERACIÓN DEL PRONÓSTICO (10 DÍAS)
 # ---------------------------------------------------------
 def generar_pronostico_10_dias(loc, config):
     """
     Calcula la curva de irradiancia futura y la guarda como JSON para Flutter.
-    Incluye campos pre-formateados en hora de México para que Flutter
-    NO necesite .toLocal() (el OS Yocto está en UTC puro).
+    Usa offset de -6 horas puro sin depender de tzdata de Linux.
     """
-    # Hora actual con offset fijo UTC-6 (no depende de /etc/localtime)
-    ahora_mx = datetime.now(TZ_MEXICO_OFFSET)
-    ahora_pd = pd.Timestamp(ahora_mx).floor('h')
+    try:
+        os.makedirs('/data', exist_ok=True)
+        ahora_mx = datetime.now(TZ_OFFSET)
+        ahora_pd = pd.Timestamp(ahora_mx).floor('h')
 
-    # Vector de tiempo: 240 horas desde ahora, con tz Etc/GMT+6
-    tiempos_futuros = pd.date_range(
-        start=ahora_pd, periods=240, freq='1h', tz=TZ_MEXICO_STR
-    )
-    cs_futuro = loc.get_clearsky(tiempos_futuros, model='haurwitz')
+        tiempos_futuros = pd.date_range(
+            start=ahora_pd, periods=240, freq='1h'
+        )
+        cs_futuro = loc.get_clearsky(tiempos_futuros, model='haurwitz')
 
-    pronostico = []
-    for t, ghi in zip(tiempos_futuros, cs_futuro['ghi']):
-        ghi_f = float(ghi)
-        if ghi_f > 0:
-            v = float(config.get('voc', 45)) * int(config.get('serie', 10))
-            i = float(config.get('isc', 9)) * int(config.get('paralelo', 2)) * (ghi_f / 1000.0)
-            p = v * i
-        else:
-            p = 0.0
+        voc = float(config.get('voc') or 49.6)
+        isc = float(config.get('isc') or 14.0)
+        serie = int(config.get('serie') or 18)
+        paralelo = int(config.get('paralelo') or 4)
 
-        # t es un Timestamp con tz Etc/GMT+6 → convierte a datetime aware
-        t_dt = t.to_pydatetime()
-        pronostico.append({
-            # epoch: número entero de segundos UTC — sin ambigüedad de zona horaria
-            "timestamp_epoch": int(t_dt.timestamp()),
-            # ISO con offset -06:00 incluido
-            "hora":      t_dt.isoformat(),
-            # Strings pre-formateados en hora local de México (para la UI de Flutter)
-            "hora_str":  t_dt.strftime("%H:00"),
-            "fecha_str": t_dt.strftime("%d/%m"),
-            "p_exp":     round(p, 2),
-            "ghi":       round(ghi_f, 2),
-        })
+        pronostico = []
+        for t, ghi in zip(tiempos_futuros, cs_futuro['ghi']):
+            ghi_f = float(ghi)
+            if ghi_f > 0:
+                v = voc * serie
+                i = isc * paralelo * (ghi_f / 1000.0)
+                p = v * i
+            else:
+                p = 0.0
 
-    with open('/data/forecast.json', 'w') as f:
-        json.dump(pronostico, f)
-    print("[HeliOs SPA] Pronóstico de 10 días generado en /data/forecast.json")
+            t_dt = t.to_pydatetime()
+            pronostico.append({
+                "timestamp_epoch": int(t_dt.timestamp()),
+                "hora": t_dt.isoformat(),
+                "hora_str": t_dt.strftime("%H:00"),
+                "fecha_str": t_dt.strftime("%d/%m"),
+                "p_exp": round(p, 2),
+                "ghi": round(ghi_f, 2),
+            })
+
+        with open('/data/forecast.json', 'w') as f:
+            json.dump(pronostico, f)
+        try:
+            os.chmod('/data/forecast.json', 0o666)
+        except Exception:
+            pass
+        print(f"[HeliOs SPA] Pronóstico de 10 días generado en /data/forecast.json ({len(pronostico)} horas)")
+    except Exception as e:
+        print(f"[HeliOs SPA] Error generando pronostico: {e}")
+        traceback.print_exc()
 
 # ---------------------------------------------------------
-# 6. BUCLE PRINCIPAL
+# 6. BUCLE PRINCIPAL BLINDADO
 # ---------------------------------------------------------
 def main():
-    # Sincronizar reloj antes de cualquier cálculo astronómico
+    os.makedirs('/data', exist_ok=True)
+
+    # Intento inicial de sincronización de reloj
     sync_system_clock_if_needed()
 
     conf = read_panel_config()
-    LAT = float(conf.get("latitud", 19.68))
-    LON = float(conf.get("longitud", -99.01))
+    LAT, LON = get_location_coordinates(conf)
 
-    # Location con zona horaria de México explícita
-    loc = pvlib.location.Location(LAT, LON, tz=TZ_MEXICO_STR)
+    # Location con offset numérico explícito tz=-6
+    loc = pvlib.location.Location(LAT, LON, tz=-6)
 
-    # Generar la predicción inicial para el Dashboard
+    # Generación inicial del pronóstico
     generar_pronostico_10_dias(loc, conf)
 
-    # Configuración MQTT (API V2)
+    # Configuración de cliente MQTT con reconexión robusta
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    try:
-        client.connect("127.0.0.1", 1883, 60)
-        client.loop_start()
-    except Exception as e:
-        print(f"[HeliOs SPA] Error de conexión MQTT: {e}")
-        return
+    mqtt_conectado = False
+    for attempt in range(10):
+        try:
+            client.connect("127.0.0.1", 1883, 60)
+            client.loop_start()
+            mqtt_conectado = True
+            print("[HeliOs SPA] Conectado a Mosquitto exitosamente.")
+            break
+        except Exception as e:
+            print(f"[HeliOs SPA] Intento {attempt+1}/10 - Esperando a Mosquitto (127.0.0.1:1883): {e}")
+            time.sleep(2)
+
+    if not mqtt_conectado:
+        # Si Mosquitto aún no inicia, client.connect_async o loop diferido
+        try:
+            client.connect_async("127.0.0.1", 1883, 60)
+            client.loop_start()
+        except Exception as e:
+            print(f"[HeliOs SPA] Conexión asíncrona MQTT: {e}")
 
     last_forecast_time = time.monotonic()
-    prev_epoch         = time.time()
+    prev_epoch = time.time()
 
-    # Bucle en tiempo real — cada 10 s para respuesta rápida al arranque
+    # Bucle infinito protegido contra cualquier excepción
     while True:
         try:
-            # Re-leer config en cada ciclo (por si el usuario cambió paneles)
             conf = read_panel_config()
-            LAT  = float(conf.get("latitud", 19.68))
-            LON  = float(conf.get("longitud", -99.01))
-            loc  = pvlib.location.Location(LAT, LON, tz=TZ_MEXICO_STR)
+            LAT, LON = get_location_coordinates(conf)
+            loc = pvlib.location.Location(LAT, LON, tz=-6)
 
-            now = pd.Timestamp(datetime.now(TZ_MEXICO_OFFSET))
-            cs     = loc.get_clearsky(pd.DatetimeIndex([now]), model='haurwitz')
+            ahora_mx = datetime.now(TZ_OFFSET)
+            now = pd.Timestamp(ahora_mx)
+
+            cs = loc.get_clearsky(pd.DatetimeIndex([now]), model='haurwitz')
             solpos = loc.get_solarposition(pd.DatetimeIndex([now]))
 
-            ghi       = float(cs['ghi'].iloc[0])
-            azimuth   = float(solpos['azimuth'].iloc[0])
+            ghi = float(cs['ghi'].iloc[0])
+            azimuth = float(solpos['azimuth'].iloc[0])
             elevation = float(solpos['elevation'].iloc[0])
 
-            v_exp = float(conf.get('voc', 45)) * int(conf.get('serie', 10))  if ghi > 0 else 0.0
-            i_exp = float(conf.get('isc', 9))  * int(conf.get('paralelo', 2)) * (ghi / 1000.0) if ghi > 0 else 0.0
-            p_exp = v_exp * i_exp
+            voc = float(conf.get('voc') or 49.6)
+            isc = float(conf.get('isc') or 14.0)
+            serie = int(conf.get('serie') or 18)
+            paralelo = int(conf.get('paralelo') or 4)
 
-            # --- Modo Estiba Nocturna (Flat-Stow) ---
+            # Cálculo de valores esperados
+            if ghi > 0.0:
+                v_exp = voc * serie
+                i_exp = isc * paralelo * (ghi / 1000.0)
+                p_exp = v_exp * i_exp
+            else:
+                v_exp = 0.0
+                i_exp = 0.0
+                p_exp = 0.0
+
+            # Modo Estiba Nocturna (Flat-Stow)
             is_night = elevation <= 0 or ghi <= 10.0
             if is_night:
-                motor_azimuth   = 180.0
+                motor_azimuth = 180.0
                 motor_elevation = 90.0
             else:
-                motor_azimuth   = round(azimuth, 2)
+                motor_azimuth = round(azimuth, 2)
                 motor_elevation = round(elevation, 2)
 
             payload_expected = {
-                "azimuth":         round(azimuth, 2),
-                "elevation":       round(elevation, 2),
-                "v_exp":           round(v_exp, 2),
-                "i_exp":           round(i_exp, 2),
-                "p_exp":           round(p_exp, 2),
-                "ghi":             round(ghi, 2),
-                "is_night":        is_night,
-                "motor_azimuth":   motor_azimuth,
+                "azimuth": round(azimuth, 2),
+                "elevation": round(elevation, 2),
+                "v_exp": round(v_exp, 2),
+                "i_exp": round(i_exp, 2),
+                "p_exp": round(p_exp, 2),
+                "ghi": round(ghi, 2),
+                "is_night": is_night,
+                "motor_azimuth": motor_azimuth,
                 "motor_elevation": motor_elevation,
+                "system_time": ahora_mx.strftime("%H:%M"),
+                "system_time_full": ahora_mx.strftime("%H:%M:%S"),
             }
-            # retain=True → Flutter recibe datos al instante al conectarse
-            client.publish("helios/spa/expected",    json.dumps(payload_expected), retain=True)
+            client.publish("helios/spa/expected", json.dumps(payload_expected), retain=True)
 
             payload_coords = {
-                "azimuth":         round(azimuth, 2),
-                "elevation":       round(elevation, 2),
-                "is_night":        is_night,
-                "motor_azimuth":   motor_azimuth,
+                "azimuth": round(azimuth, 2),
+                "elevation": round(elevation, 2),
+                "is_night": is_night,
+                "motor_azimuth": motor_azimuth,
                 "motor_elevation": motor_elevation,
             }
             client.publish("helios/spa/coordinates", json.dumps(payload_coords), retain=True)
 
         except Exception as e:
             print(f"[HeliOs SPA] Error en el ciclo principal: {e}")
+            traceback.print_exc()
 
-        # --- Regenerar pronóstico cada 15 min, o si el reloj saltó > 2 min ---
-        now_epoch  = time.time()
-        elapsed    = time.monotonic() - last_forecast_time
-        clock_jump = abs(now_epoch - prev_epoch - 10) > 120  # salto > 2 min
+        # Regenerar pronóstico cada 15 min o ante saltos bruscos de reloj
+        try:
+            now_epoch = time.time()
+            elapsed = time.monotonic() - last_forecast_time
+            clock_jump = abs(now_epoch - prev_epoch - 10) > 120
 
-        if elapsed >= 900 or clock_jump:
-            # Intentar re-sincronizar reloj si el año sigue siendo incorrecto
-            reloj_actualizado = sync_system_clock_if_needed()
-            try:
+            if elapsed >= 900 or clock_jump:
+                reloj_actualizado = sync_system_clock_if_needed()
                 generar_pronostico_10_dias(loc, conf)
                 last_forecast_time = time.monotonic()
                 if reloj_actualizado:
-                    print("[HeliOs SPA] Pronóstico regenerado tras sincronización de reloj.")
-            except Exception as e:
-                print(f"[HeliOs SPA] Error regenerando pronóstico: {e}")
+                    print("[HeliOs SPA] Pronóstico actualizado tras sincronización horaria.")
+            prev_epoch = now_epoch
+        except Exception as e:
+            print(f"[HeliOs SPA] Error en verificación de pronóstico: {e}")
+            traceback.print_exc()
 
-        prev_epoch = now_epoch
-        time.sleep(10)  # Ciclo rápido: 10 segundos
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()
