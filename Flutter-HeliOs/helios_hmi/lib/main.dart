@@ -1,27 +1,19 @@
-import 'dart:io';
 import 'dart:async';
-import 'dart:ffi'; // NUEVO: Interfaz de Funciones Foráneas para C/C++
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:sqlite3/open.dart'; // NUEVO: Control manual del motor SQLite
 
+import 'database/db_platform.dart';
 import 'services/mqtt_service.dart';
+import 'theme/helios_theme.dart';
 import 'ui/dashboard.dart';
 import 'ui/provisioning_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. PUENTE Yocto-Linux: Obligamos a Dart a leer la librería de Runtime de Yocto
-  open.overrideFor(OperatingSystem.linux, () {
-    try {
-      return DynamicLibrary.open('libsqlite3.so');
-    } catch (_) {
-      // Si falla, enlazamos a la librería exacta que Yocto instala por defecto
-      return DynamicLibrary.open('libsqlite3.so.0');
-    }
-  });
+  // Inicialización de SQLite según la plataforma (Yocto-Linux / Native / Web)
+  initDatabasePlatform();
 
   runApp(
     MultiProvider(
@@ -44,11 +36,17 @@ class HeliosApp extends StatelessWidget {
       title: 'HeliOs HMI',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212),
+        scaffoldBackgroundColor: HeliosTheme.abyssalAnchorfishBlue,
+        cardColor: HeliosTheme.blueFantastic,
         cardTheme: const CardThemeData(
-          color: Color(0xFF1E1E1E),
-          elevation: 8,
+          color: HeliosTheme.blueFantastic,
+          elevation: 6,
           margin: EdgeInsets.all(12),
+        ),
+        colorScheme: const ColorScheme.dark(
+          primary: HeliosTheme.burningFlame,
+          secondary: HeliosTheme.truffleTrouble,
+          surface: HeliosTheme.blueFantastic,
         ),
       ),
       home: const RootController(),
@@ -78,8 +76,7 @@ class _RootControllerState extends State<RootController> {
   }
 
   void _checkProvisioningStatus() {
-    final configFile = File('/data/wifi_config.json');
-    final bool isMissing = !configFile.existsSync();
+    final bool isMissing = isProvisioningFileMissing();
 
     if (_isProvisioningMode != isMissing) {
       setState(() {

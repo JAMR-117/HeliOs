@@ -3,10 +3,10 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
+import 'mqtt_client_factory.dart';
 
 class MqttService extends ChangeNotifier {
-  MqttServerClient? _client;
+  MqttClient? _client;
   bool isConnected = false;
 
   Map<String, dynamic> telemetryData = {};
@@ -17,8 +17,7 @@ class MqttService extends ChangeNotifier {
   };
 
   Future<void> connect(String brokerIp) async {
-    _client = MqttServerClient(brokerIp, 'helios_hmi_client');
-    _client!.port = 1883;
+    _client = createMqttClient(brokerIp, 'helios_hmi_client');
     _client!.keepAlivePeriod = 20;
     _client!.autoReconnect =
         true; // Habilita reconexión nativa si se cae la red

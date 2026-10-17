@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
-
 import 'dart:math';
+import '../theme/helios_theme.dart';
 
 class RoiChart extends StatelessWidget {
   final Map<String, dynamic> spaData;
@@ -40,133 +40,172 @@ class RoiChart extends StatelessWidget {
       heliosSpots.add(FlSpot(h, 500.0 * hEff));
     }
 
-    return Card(
-      color: const Color(0xFF1E1E1E),
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'ESTIMADOR DE ROI',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.cyanAccent,
+    return Container(
+      decoration: BoxDecoration(
+        color: HeliosTheme.blueFantastic,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: HeliosTheme.oatmeal.withValues(alpha: 0.25),
+        ),
+      ),
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'ESTIMADOR DE ROI',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: HeliosTheme.palladian,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              Text(
+                elevation > 0
+                    ? 'GANANCIA ACTUAL: +$gainPercentage%'
+                    : 'SISTEMA EN REPOSO',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: elevation > 0 ? HeliosTheme.burningFlame : HeliosTheme.oatmeal,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 28),
+          Expanded(
+            child: LineChart(
+              LineChartData(
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color: HeliosTheme.oatmeal.withValues(alpha: 0.12),
+                    strokeWidth: 1,
                   ),
                 ),
-                Text(
-                  elevation > 0
-                      ? 'GANANCIA ACTUAL: +$gainPercentage%'
-                      : 'SISTEMA EN REPOSO',
-                  style: TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    color: elevation > 0 ? Colors.greenAccent : Colors.white54,
+                titlesData: FlTitlesData(
+                  rightTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  topTitles: const AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 30,
+                      getTitlesWidget: (value, meta) {
+                        if (value % 2 == 0) {
+                          return Text(
+                            '${value.toInt()}:00',
+                            style: const TextStyle(
+                              color: HeliosTheme.oatmeal,
+                              fontSize: 12,
+                            ),
+                          );
+                        }
+                        return const Text('');
+                      },
+                    ),
+                  ),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 45,
+                      getTitlesWidget: (value, meta) {
+                        return Text(
+                          '${value.toInt()}W',
+                          style: const TextStyle(
+                            color: HeliosTheme.oatmeal,
+                            fontSize: 11,
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 30),
-            Expanded(
-              child: LineChart(
-                LineChartData(
-                  gridData: const FlGridData(
-                    show: true,
-                    drawVerticalLine: false,
+                borderData: FlBorderData(show: false),
+                minX: 6,
+                maxX: 18,
+                minY: 0,
+                maxY: 600,
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: staticSpots,
+                    isCurved: true,
+                    color: HeliosTheme.oatmeal.withValues(alpha: 0.6),
+                    barWidth: 3,
+                    isStrokeCapRound: true,
+                    dotData: const FlDotData(show: false),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      color: HeliosTheme.oatmeal.withValues(alpha: 0.08),
+                    ),
                   ),
-                  titlesData: FlTitlesData(
-                    rightTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
+                  LineChartBarData(
+                    spots: heliosSpots,
+                    isCurved: true,
+                    gradient: const LinearGradient(
+                      colors: [
+                        HeliosTheme.burningFlame,
+                        HeliosTheme.truffleTrouble,
+                      ],
                     ),
-                    topTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 30,
-                        getTitlesWidget: (value, meta) {
-                          if (value % 2 == 0) {
-                            return Text(
-                              '${value.toInt()}:00',
-                              style: const TextStyle(color: Colors.white54),
-                            );
-                          }
-                          return const Text('');
-                        },
+                    barWidth: 4,
+                    isStrokeCapRound: true,
+                    dotData: const FlDotData(show: false),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          HeliosTheme.burningFlame.withValues(alpha: 0.35),
+                          HeliosTheme.burningFlame.withValues(alpha: 0.0),
+                        ],
                       ),
                     ),
                   ),
-                  borderData: FlBorderData(show: false),
-                  minX: 6,
-                  maxX: 18,
-                  minY: 0,
-                  maxY: 600,
-                  lineBarsData: [
-                    LineChartBarData(
-                      spots: staticSpots,
-                      isCurved: true,
-                      color: Colors.grey.withValues(alpha: 0.5),
-                      barWidth: 4,
-                      isStrokeCapRound: true,
-                      dotData: const FlDotData(show: false),
-                      belowBarData: BarAreaData(
-                        show: true,
-                        color: Colors.grey.withValues(alpha: 0.1),
-                      ),
-                    ),
-                    LineChartBarData(
-                      spots: heliosSpots,
-                      isCurved: true,
-                      color: Colors.cyanAccent,
-                      barWidth: 6,
-                      isStrokeCapRound: true,
-                      dotData: const FlDotData(show: false),
-                      belowBarData: BarAreaData(
-                        show: true,
-                        color: Colors.cyanAccent.withValues(alpha: 0.2),
-                      ),
-                    ),
-                  ],
-                  lineTouchData: LineTouchData(
-                    getTouchedSpotIndicator:
-                        (LineChartBarData barData, List<int> spotIndexes) {
-                          return spotIndexes.map((index) {
-                            return TouchedSpotIndicatorData(
-                              const FlLine(
-                                color: Colors.white38,
-                                strokeWidth: 2,
-                                dashArray: [5, 5],
-                              ),
-                              const FlDotData(show: true),
-                            );
-                          }).toList();
-                        },
-                  ),
+                ],
+                lineTouchData: LineTouchData(
+                  getTouchedSpotIndicator:
+                      (LineChartBarData barData, List<int> spotIndexes) {
+                    return spotIndexes.map((index) {
+                      return TouchedSpotIndicatorData(
+                        FlLine(
+                          color: HeliosTheme.burningFlame.withValues(alpha: 0.6),
+                          strokeWidth: 2,
+                          dashArray: const [5, 5],
+                        ),
+                        const FlDotData(show: true),
+                      );
+                    }).toList();
+                  },
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _buildLegendItem(
-                  Colors.cyanAccent,
-                  'Seguidor HeliOs (${heliosWatts.round()}W)',
-                ),
-                const SizedBox(width: 40),
-                _buildLegendItem(
-                  Colors.grey,
-                  'Panel Estático (${staticWatts.round()}W)',
-                ),
-              ],
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildLegendItem(
+                HeliosTheme.burningFlame,
+                'Seguidor HeliOs (${heliosWatts.round()}W)',
+              ),
+              const SizedBox(width: 40),
+              _buildLegendItem(
+                HeliosTheme.oatmeal,
+                'Panel Estático (${staticWatts.round()}W)',
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -175,12 +214,19 @@ class RoiChart extends StatelessWidget {
     return Row(
       children: [
         Container(
-          width: 20,
-          height: 20,
+          width: 14,
+          height: 14,
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         const SizedBox(width: 8),
-        Text(text, style: const TextStyle(fontSize: 18, color: Colors.white70)),
+        Text(
+          text,
+          style: const TextStyle(
+            fontSize: 14,
+            color: HeliosTheme.palladian,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ],
     );
   }

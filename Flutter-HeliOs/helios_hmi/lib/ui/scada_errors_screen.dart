@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/mqtt_service.dart';
+import '../theme/helios_theme.dart';
 
 class ScadaErrorRecord {
   final String timestamp;
@@ -32,10 +33,9 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
   bool _isLoading = false;
   Timer? _refreshTimer;
 
-  static const Color _bgColor = Color(0xFF131B2A);
-  static const Color _cardColor = Color(0xFF1E293B);
-  static const Color _textMuted = Color(0xFF94A3B8);
-  static const Color _accentBlue = Color(0xFF38BDF8);
+  static const Color _cardColor = HeliosTheme.blueFantastic;
+  static const Color _textMuted = HeliosTheme.oatmeal;
+  static const Color _accentBlue = HeliosTheme.burningFlame;
 
   @override
   void initState() {
@@ -101,11 +101,11 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
 
   Color _getSeverityColor(int code) {
     if (code == 13 || code == 20 || code == 21 || code == 32) {
-      return Colors.redAccent;
+      return HeliosTheme.truffleTrouble;
     } else if (code == 14 || code == 1 || code == 2) {
-      return Colors.orangeAccent;
+      return HeliosTheme.burningFlame;
     }
-    return Colors.amberAccent;
+    return HeliosTheme.oatmeal;
   }
 
   String _formatTimestamp(String raw) {
@@ -132,136 +132,158 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
         scada['description'] as String? ?? 'Operación Normal';
     final bool hasActiveAlarm = activeCode != 0;
 
-    return Scaffold(
-      backgroundColor: _bgColor,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        leading: const BackButton(color: Colors.white),
-        title: const Text(
-          'Bitácora de Errores SCADA',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 1.2,
-          ),
-        ),
-        actions: [
-          IconButton(
-            icon: _isLoading
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: _accentBlue,
-                    ),
-                  )
-                : const Icon(Icons.refresh, color: _accentBlue),
-            tooltip: 'Recargar bitácora',
-            onPressed: _isLoading ? null : _loadHistoricalErrors,
-          ),
-          const SizedBox(width: 8),
-        ],
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: HeliosTheme.nightBackgroundGradient,
       ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  flex: 3,
-                  child: Container(
-                    padding: const EdgeInsets.all(16.0),
-                    decoration: BoxDecoration(
-                      color: hasActiveAlarm
-                          ? Colors.red.shade900.withValues(alpha: 0.4)
-                          : _cardColor,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          leading: const BackButton(color: HeliosTheme.palladian),
+          title: const Text(
+            'Bitácora de Errores SCADA',
+            style: TextStyle(
+              color: HeliosTheme.palladian,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.2,
+            ),
+          ),
+          actions: [
+            IconButton(
+              icon: _isLoading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: _accentBlue,
+                      ),
+                    )
+                  : const Icon(Icons.refresh, color: _accentBlue),
+              tooltip: 'Recargar bitácora',
+              onPressed: _isLoading ? null : _loadHistoricalErrors,
+            ),
+            const SizedBox(width: 8),
+          ],
+        ),
+        body: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Container(
+                      padding: const EdgeInsets.all(16.0),
+                      decoration: BoxDecoration(
                         color: hasActiveAlarm
-                            ? Colors.redAccent
-                            : Colors.transparent,
-                        width: 1.5,
+                            ? HeliosTheme.truffleTrouble.withValues(alpha: 0.35)
+                            : _cardColor,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: hasActiveAlarm
+                              ? HeliosTheme.truffleTrouble
+                              : HeliosTheme.oatmeal.withValues(alpha: 0.2),
+                          width: 1.5,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.2),
+                            blurRadius: 8,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            hasActiveAlarm
+                                ? Icons.warning_amber_rounded
+                                : Icons.check_circle_outline,
+                            color: hasActiveAlarm
+                                ? HeliosTheme.truffleTrouble
+                                : HeliosTheme.burningFlame,
+                            size: 34,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Falla Activa Actual',
+                                  style: TextStyle(
+                                    color: _textMuted,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  hasActiveAlarm
+                                      ? 'CÓDIGO $activeCode: ${activeDesc.toUpperCase()}'
+                                      : 'SIN ALARMAS ACTIVAS',
+                                  style: TextStyle(
+                                    color: hasActiveAlarm
+                                        ? HeliosTheme.burningFlame
+                                        : HeliosTheme.palladian,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          hasActiveAlarm
-                              ? Icons.warning_amber_rounded
-                              : Icons.check_circle_outline,
-                          color: hasActiveAlarm
-                              ? Colors.redAccent
-                              : Colors.greenAccent,
-                          size: 34,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: Container(
+                      padding: const EdgeInsets.all(16.0),
+                      decoration: BoxDecoration(
+                        color: _cardColor,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: HeliosTheme.oatmeal.withValues(alpha: 0.2),
+                          width: 1,
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Falla Activa Actual',
-                                style: TextStyle(
-                                  color: _textMuted,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                hasActiveAlarm
-                                    ? 'CÓDIGO $activeCode: ${activeDesc.toUpperCase()}'
-                                    : 'SIN ALARMAS ACTIVAS',
-                                style: TextStyle(
-                                  color: hasActiveAlarm
-                                      ? Colors.redAccent
-                                      : Colors.greenAccent,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.2),
+                            blurRadius: 8,
+                            offset: const Offset(0, 3),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Total de Eventos',
+                            style: TextStyle(color: _textMuted, fontSize: 12),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '${_errorLogs.length}',
+                            style: const TextStyle(
+                              color: HeliosTheme.palladian,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 24,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 2,
-                  child: Container(
-                    padding: const EdgeInsets.all(16.0),
-                    decoration: BoxDecoration(
-                      color: _cardColor,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Total de Eventos',
-                          style: TextStyle(color: _textMuted, fontSize: 12),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${_errorLogs.length}',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 24,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
+                ],
+              ),
             const SizedBox(height: 18),
             const Text(
               'Histórico de Alarmas Registradas',
@@ -353,7 +375,7 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                                     Text(
                                       record.description,
                                       style: const TextStyle(
-                                        color: Colors.white,
+                                        color: HeliosTheme.palladian,
                                         fontWeight: FontWeight.w600,
                                         fontSize: 14,
                                       ),
@@ -383,6 +405,7 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
           ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 }
