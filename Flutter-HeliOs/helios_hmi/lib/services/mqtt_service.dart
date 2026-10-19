@@ -3,13 +3,42 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
+import '../database/db_platform.dart';
 import 'mqtt_client_factory.dart';
-
-enum DashboardThemeMode { auto, forceDay, forceNight }
 
 class MqttService extends ChangeNotifier {
   MqttClient? _client;
   bool isConnected = false;
+
+  DateTime? _lastInverterPacketTime;
+  Timer? _inverterWatchdogTimer;
+  bool _inverterActive = false;
+
+  /// Retorna true si se ha recibido telemetría del inversor en los últimos 15 segundos.
+  bool get isInverterConnected => _inverterActive;
+
+  MqttService() {
+    _startInverterWatchdog();
+  }
+
+  void _startInverterWatchdog() {
+    _inverterWatchdogTimer?.cancel();
+    _inverterWatchdogTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_lastInverterPacketTime != null) {
+        final diff = DateTime.now().difference(_lastInverterPacketTime!).inSeconds;
+        final bool shouldBeActive = diff <= 15;
+        if (_inverterActive != shouldBeActive) {
+          _inverterActive = shouldBeActive;
+          notifyListeners();
+        }
+      } else {
+        if (_inverterActive) {
+          _inverterActive = false;
+          notifyListeners();
+        }
+      }
+    });
+  }
 
   Map<String, dynamic> telemetryData = {};
   Map<String, dynamic> spaData = {};
@@ -18,36 +47,47 @@ class MqttService extends ChangeNotifier {
     "description": "Operación Normal",
   };
 
-  // --- MODO DE TEMA CENTRALIZADO ---
-  DashboardThemeMode _themeMode = DashboardThemeMode.auto;
-  DashboardThemeMode get themeMode => _themeMode;
+  // --- OVERRIDE TEMPORAL DE CLIMA (DESDE SIMULADOR) ---
+  String? _overrideWeatherState;
+  int? _overrideCloudCover;
+  Timer? _overrideTimer;
+  bool get isWeatherOverridden => _overrideWeatherState != null;
 
-  void setThemeMode(DashboardThemeMode mode) {
-    if (_themeMode != mode) {
-      _themeMode = mode;
-      notifyListeners();
+  String get weatherState {
+    if (_overrideWeatherState != null) {
+      return _overrideWeatherState!;
     }
+    final state = spaData['weather_state'] as String?;
+    if (state != null && state.isNotEmpty) {
+      return state;
+    }
+    return isNight ? 'clear_night' : 'sunny';
+  }
+
+  int get cloudCover {
+    if (_overrideCloudCover != null) {
+      return _overrideCloudCover!;
+    }
+    return (spaData['cloud_cover'] as num?)?.toInt() ?? 0;
   }
 
   /// Retorna si el sistema debe renderizarse en Modo Noche (oscuro).
-  /// Si el tema está en auto:
+  /// El tema ahora es 100% automático gobernado por el clima activo:
+  /// - Si hay override de clima activo, respeta dicho estado.
   /// - Si spaData tiene 'is_night', respeta la efeméride astronómica.
   /// - Si aún no hay spaData, infiere según la hora actual en UTC-6 (06:30 a 18:30 es día).
   bool get isNight {
-    switch (_themeMode) {
-      case DashboardThemeMode.forceDay:
-        return false;
-      case DashboardThemeMode.forceNight:
-        return true;
-      case DashboardThemeMode.auto:
-        if (spaData.containsKey('is_night')) {
-          return spaData['is_night'] as bool? ?? false;
-        }
-        final nowUtc6 = DateTime.now().toUtc().subtract(const Duration(hours: 6));
-        final hourMinute = nowUtc6.hour * 60 + nowUtc6.minute;
-        // Día: 06:30 (390 min) hasta 18:30 (1110 min)
-        return hourMinute < 390 || hourMinute >= 1110;
+    if (_overrideWeatherState != null) {
+      return _overrideWeatherState == 'clear_night' ||
+          _overrideWeatherState == 'cloudy_night';
     }
+    if (spaData.containsKey('is_night')) {
+      return spaData['is_night'] as bool? ?? false;
+    }
+    final nowUtc6 = DateTime.now().toUtc().subtract(const Duration(hours: 6));
+    final hourMinute = nowUtc6.hour * 60 + nowUtc6.minute;
+    // Día: 06:30 (390 min) hasta 18:30 (1110 min)
+    return hourMinute < 390 || hourMinute >= 1110;
   }
 
   // --- BITÁCORA DE ERRORES EN MEMORIA (SESIÓN ACTUAL) ---
@@ -76,14 +116,58 @@ class MqttService extends ChangeNotifier {
       return; // No duplicar si es la misma alarma continua
     }
     final nowUtc6 = DateTime.now().toUtc().subtract(const Duration(hours: 6));
+    final String tsStr = _formatTimestamp(nowUtc6);
     sessionErrors.insert(0, {
-      'timestamp': _formatTimestamp(nowUtc6),
+      'timestamp': tsStr,
       'code': code,
       'description': description,
     });
     // Limitar tamaño de bitácora en memoria
     if (sessionErrors.length > 100) {
       sessionErrors.removeLast();
+    }
+    _persistErrorToDb(tsStr, code, description);
+  }
+
+  void _persistErrorToDb(String timestamp, int code, String description) async {
+    try {
+      final db = await openAppDatabase('/data/helios_history.db');
+      if (db != null) {
+        db.execute(
+          'INSERT INTO scada_errors (timestamp, code, description) VALUES (?, ?, ?)',
+          [timestamp, code, description],
+        );
+        db.dispose();
+      }
+    } catch (_) {}
+  }
+
+  void _checkAnalyticalAnomalies() {
+    final double vDc = (telemetryData['v_dc'] as num?)?.toDouble() ?? 0.0;
+    final double powerW = (telemetryData['power_w'] as num?)?.toDouble() ?? 0.0;
+    final double tempC = (telemetryData['temp_c'] as num?)?.toDouble() ?? 0.0;
+
+    final double ghi = (spaData['ghi'] as num?)?.toDouble() ?? 0.0;
+    final double vExp = (spaData['v_exp'] as num?)?.toDouble() ?? 0.0;
+    final double pExp = (spaData['p_exp'] as num?)?.toDouble() ?? 0.0;
+
+    // Solo evaluar si hay telemetría activa del inversor
+    if (!isInverterConnected && telemetryData.isEmpty) return;
+
+    if (tempC > 65.0) {
+      const desc = "Sobrecalentamiento en Inversor (> 65°C)";
+      scadaData = {"inverter": 1, "code": 103, "description": desc};
+      _recordSessionError(103, desc);
+    } else if (!isNight && ghi > 20.0 && vExp > 0.0) {
+      if (vDc < vExp * 0.90) {
+        const desc = "Pérdida de Panel en Serie Detectada (Caída de Voltaje DC)";
+        scadaData = {"inverter": 1, "code": 101, "description": desc};
+        _recordSessionError(101, desc);
+      } else if (pExp > 50.0 && powerW < pExp * 0.85) {
+        const desc = "Sombreo o Suciedad en Arreglo Fotovoltaico (Baja Potencia)";
+        scadaData = {"inverter": 1, "code": 102, "description": desc};
+        _recordSessionError(102, desc);
+      }
     }
   }
 
@@ -125,6 +209,7 @@ class MqttService extends ChangeNotifier {
         _client!.subscribe("helios/spa/expected", MqttQos.atLeastOnce);
         _client!.subscribe("helios/spa/coordinates", MqttQos.atLeastOnce);
         _client!.subscribe("helios/scada/alerts", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/weather/override", MqttQos.atLeastOnce);
 
         _client!.updates!.listen((List<MqttReceivedMessage<MqttMessage>> c) {
           final recMess = c[0].payload as MqttPublishMessage;
@@ -136,6 +221,8 @@ class MqttService extends ChangeNotifier {
           try {
             final data = json.decode(payload);
             if (topic == "helios/inverter/telemetry") {
+              _lastInverterPacketTime = DateTime.now();
+              _inverterActive = true;
               telemetryData = data;
               final int fault = (data['fault'] as num?)?.toInt() ?? 0;
               if (fault != 0) {
@@ -143,19 +230,21 @@ class MqttService extends ChangeNotifier {
                   1: "Sobrevoltaje de Red",
                   13: "Fuga a Tierra Detectada",
                   14: "Sobrecalentamiento del Inversor",
-                  101: "Pérdida de Panel en Serie",
-                  102: "Sombreo o Suciedad en Arreglo",
-                  103: "Alerta Térmica: Sobrecalentamiento (>65°C)",
+                  101: "Pérdida de Panel en Serie Detectada (Caída de Voltaje DC)",
+                  102: "Sombreo o Suciedad en Arreglo Fotovoltaico (Baja Potencia)",
+                  103: "Sobrecalentamiento en Inversor (> 65°C)",
                 };
                 _recordSessionError(
                   fault,
                   sunspecNames[fault] ?? 'Falla Inversor SunSpec código $fault',
                 );
               }
+              _checkAnalyticalAnomalies();
               _recordPowerPoint();
             } else if (topic == "helios/spa/expected" ||
                 topic == "helios/spa/coordinates") {
               spaData.addAll(data);
+              _checkAnalyticalAnomalies();
               _recordPowerPoint();
             } else if (topic == "helios/scada/alerts") {
               scadaData = data;
@@ -165,6 +254,18 @@ class MqttService extends ChangeNotifier {
               if (code != 0) {
                 _recordSessionError(code, desc);
               }
+            } else if (topic == "helios/weather/override") {
+              final st = data['weather_state'] as String?;
+              final cc = (data['cloud_cover'] as num?)?.toInt() ?? 0;
+              final dur = (data['duration_sec'] as num?)?.toInt() ?? 20;
+              _overrideWeatherState = st;
+              _overrideCloudCover = cc;
+              _overrideTimer?.cancel();
+              _overrideTimer = Timer(Duration(seconds: dur), () {
+                _overrideWeatherState = null;
+                _overrideCloudCover = null;
+                notifyListeners();
+              });
             }
             notifyListeners();
           } catch (_) {}
@@ -180,9 +281,24 @@ class MqttService extends ChangeNotifier {
     attemptConnect();
   }
 
+  void publishConfigReload() {
+    if (_client != null && isConnected) {
+      final builder = MqttClientPayloadBuilder();
+      builder.addString(json.encode({'action': 'reload'}));
+      _client!.publishMessage(
+        'helios/config/reload',
+        MqttQos.atLeastOnce,
+        builder.payload!,
+      );
+    }
+  }
+
   @override
   void dispose() {
+    _inverterWatchdogTimer?.cancel();
+    _overrideTimer?.cancel();
     _client?.disconnect();
     super.dispose();
   }
 }
+

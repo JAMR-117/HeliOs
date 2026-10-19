@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'package:flutter/gestures.dart';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -7,6 +8,7 @@ import 'package:fl_chart/fl_chart.dart';
 
 import '../services/mqtt_service.dart';
 import '../theme/helios_theme.dart';
+import '../theme/weather_palette.dart';
 import '../database/db_platform.dart';
 import 'scada_errors_screen.dart';
 import 'plant_config_screen.dart';
@@ -31,7 +33,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) => _updateClock());
 
     _loadForecast();
-    _startForecastTimer(const Duration(seconds: 10));
+    _startForecastTimer(const Duration(seconds: 1));
   }
 
   void _updateClock() {
@@ -50,8 +52,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(interval, (_) async {
       await _loadForecast();
-      if (_forecastData.isNotEmpty) {
-        _startForecastTimer(const Duration(minutes: 5));
+      if (_forecastData.isNotEmpty && interval != const Duration(seconds: 60)) {
+        _startForecastTimer(const Duration(seconds: 60));
       }
     });
   }
@@ -84,99 +86,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }).toList();
 
+      final List<dynamic> next24 = filtered.take(24).toList();
       if (!mounted) return;
-      setState(() => _forecastData = filtered);
+      setState(() => _forecastData = next24);
     } catch (e) {
       debugPrint("Error leyendo pronóstico: $e");
     }
-  }
-
-  void _showThemeMenu(BuildContext context, MqttService mqttService, bool isNight) {
-    final Color sheetBg = isNight ? HeliosTheme.blueFantastic : HeliosTheme.palladian;
-    final Color titleColor = isNight ? HeliosTheme.palladian : HeliosTheme.abyssalAnchorfishBlue;
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: sheetBg,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Modo de Tema',
-              style: TextStyle(
-                color: titleColor,
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            _themeOption(
-              icon: Icons.brightness_auto,
-              label: 'Automático (según efemérides solares)',
-              value: DashboardThemeMode.auto,
-              currentMode: mqttService.themeMode,
-              isNight: isNight,
-              onSelect: (m) => mqttService.setThemeMode(m),
-            ),
-            _themeOption(
-              icon: Icons.wb_sunny,
-              label: 'Forzar Día',
-              value: DashboardThemeMode.forceDay,
-              currentMode: mqttService.themeMode,
-              isNight: isNight,
-              onSelect: (m) => mqttService.setThemeMode(m),
-            ),
-            _themeOption(
-              icon: Icons.nightlight_round,
-              label: 'Forzar Noche',
-              value: DashboardThemeMode.forceNight,
-              currentMode: mqttService.themeMode,
-              isNight: isNight,
-              onSelect: (m) => mqttService.setThemeMode(m),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _themeOption({
-    required IconData icon,
-    required String label,
-    required DashboardThemeMode value,
-    required DashboardThemeMode currentMode,
-    required bool isNight,
-    required ValueChanged<DashboardThemeMode> onSelect,
-  }) {
-    final bool selected = currentMode == value;
-    final Color activeColor = HeliosTheme.burningFlame;
-    final Color inactiveColor =
-        isNight ? HeliosTheme.oatmeal : HeliosTheme.blueFantastic;
-
-    return ListTile(
-      leading: Icon(
-        icon,
-        color: selected ? activeColor : inactiveColor.withValues(alpha: 0.6),
-      ),
-      title: Text(
-        label,
-        style: TextStyle(
-          color: selected ? activeColor : inactiveColor,
-          fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-        ),
-      ),
-      trailing: selected ? Icon(Icons.check, color: activeColor) : null,
-      onTap: () {
-        onSelect(value);
-        Navigator.pop(context);
-      },
-    );
   }
 
   @override
@@ -223,14 +138,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
         expVoltage > 0 &&
         realVoltage < expVoltage * 0.90) {
       hasError = true;
-      alertMessage = "ALERTA: PÉRDIDA DE PANEL EN SERIE";
+      alertMessage = "FALLA SCADA (101): PÉRDIDA DE PANEL EN SERIE";
     } else if (!isNight &&
         realPower != null &&
         expPower != null &&
         expPower > 0 &&
         realPower < expPower * 0.85) {
       hasError = true;
-      alertMessage = "ALERTA: SOMBREO O SUCIEDAD";
+      alertMessage = "FALLA SCADA (102): SOMBREO O SUCIEDAD";
+    } else if (tempC != null && tempC > 65.0) {
+      hasError = true;
+      alertMessage = "FALLA SCADA (103): SOBRECALENTAMIENTO EN INVERSOR";
     } else if (isNight) {
       alertMessage = "MODO NOCTURNO - PANELES EN ESTIBA";
     } else if (telemetry.isNotEmpty) {
@@ -262,44 +180,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     // ---------------------------------------------------------
-    // PALETA DINÁMICA OFICIAL HELIOS: Día vs Noche
+    // SISTEMA CROMÁTICO ADAPTATIVO POR CLIMA (TAREA 4)
     // ---------------------------------------------------------
-    final Color cardColor;
-    final Color cardBorderColor;
-    final Color textPrimary;
-    final Color textMuted;
-    final Color accentSolar = HeliosTheme.burningFlame;
-    final Color accentWarm = HeliosTheme.truffleTrouble;
-    final Gradient bgGradient;
-    final Gradient headerGradient;
+    final String activeWeatherState = mqttService.weatherState;
+    final WeatherPalette palette = WeatherPalette.getPalette(activeWeatherState, isNight);
 
-    if (isNight) {
-      cardColor       = HeliosTheme.blueFantastic;
-      cardBorderColor = HeliosTheme.oatmeal.withValues(alpha: 0.18);
-      textPrimary     = HeliosTheme.palladian;
-      textMuted       = HeliosTheme.oatmeal;
-      bgGradient      = HeliosTheme.nightBackgroundGradient;
-      headerGradient  = HeliosTheme.nightHeaderGradient;
-    } else {
-      cardColor       = const Color(0xFFFAF7F2);
-      cardBorderColor = HeliosTheme.oatmeal.withValues(alpha: 0.5);
-      textPrimary     = HeliosTheme.abyssalAnchorfishBlue;
-      textMuted       = HeliosTheme.blueFantastic.withValues(alpha: 0.75);
-      bgGradient      = HeliosTheme.dayBackgroundGradient;
-      headerGradient  = HeliosTheme.dayHeaderGradient;
-    }
+    final Color cardColor = palette.cardColor;
+    final Color cardBorderColor = palette.cardBorderColor;
+    final Color textPrimary = palette.textPrimary;
+    final Color textMuted = palette.textMuted;
+    final Color accentSolar = palette.accentSolar;
+    final Color accentWarm = palette.accentSecondary;
 
     final Color statusColor = hasError
-        ? HeliosTheme.truffleTrouble.withValues(alpha: isNight ? 0.35 : 0.15)
-        : isNight
-            ? HeliosTheme.blueFantastic.withValues(alpha: 0.7)
-            : cardColor;
+        ? HeliosTheme.truffleTrouble.withValues(alpha: isNight ? 0.35 : 0.20)
+        : palette.cardColor;
 
     final Color statusBorderColor = hasError
         ? HeliosTheme.truffleTrouble
         : isNight
-            ? HeliosTheme.burningFlame.withValues(alpha: 0.6)
-            : cardBorderColor;
+            ? palette.accentSolar.withValues(alpha: 0.6)
+            : palette.cardBorderColor;
 
     final String motorAzStr = motorAz != null ? motorAz.toStringAsFixed(1) : '--';
     final String motorElStr = motorEl != null ? motorEl.toStringAsFixed(1) : '--';
@@ -308,115 +209,139 @@ class _DashboardScreenState extends State<DashboardScreen> {
         : 'Óptimo Solar Calculado';
 
     return Container(
-      decoration: BoxDecoration(
-        gradient: bgGradient,
-      ),
+      decoration: palette.rootDecoration,
       child: Scaffold(
+        extendBodyBehindAppBar: true,
         backgroundColor: Colors.transparent,
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,
           centerTitle: true,
-          iconTheme: IconThemeData(
-            color: textPrimary,
-            size: 28,
-          ),
-          // Reloj centrado provisional para supervisión y sincronización
-          title: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.access_time, color: textPrimary, size: 20),
-              const SizedBox(width: 6),
-              Text(
-                _currentTimeStr,
-                style: TextStyle(
-                  color: textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1.0,
+          // Óvalo / Círculo para menú hamburguesa
+          leading: Padding(
+            padding: const EdgeInsets.only(left: 12.0),
+            child: Center(
+              child: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: palette.headerCapsuleBg,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: palette.headerCapsuleBorder, width: 1),
+                  boxShadow: palette.headerCapsuleShadow,
+                ),
+                child: Builder(
+                  builder: (ctx) => IconButton(
+                    icon: Icon(Icons.menu, color: palette.headerCapsuleText, size: 20),
+                    tooltip: 'Menú principal',
+                    padding: EdgeInsets.zero,
+                    onPressed: () => Scaffold.of(ctx).openDrawer(),
+                  ),
                 ),
               ),
-            ],
+            ),
           ),
+          // Óvalo Central para Reloj (Alto Contraste)
+          title: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: BoxDecoration(
+              color: palette.headerCapsuleBg,
+              borderRadius: BorderRadius.circular(30),
+              border: Border.all(color: palette.headerCapsuleBorder, width: 1),
+              boxShadow: palette.headerCapsuleShadow,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.access_time, color: palette.headerCapsuleText, size: 18),
+                const SizedBox(width: 8),
+                Text(
+                  _currentTimeStr,
+                  style: TextStyle(
+                    color: palette.headerCapsuleText,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Óvalo Derecho para Temperatura, kWh, Tema y Estado de Inversor
           actions: [
             Padding(
-              padding: const EdgeInsets.only(right: 8.0),
-              child: Row(
-                children: [
-                  if (tempC != null) ...[
-                    Icon(
-                      Icons.thermostat,
-                      color: tempC > 65 ? HeliosTheme.truffleTrouble : textMuted,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${tempC.toStringAsFixed(1)}°C',
-                      style: TextStyle(
-                        color: tempC > 65 ? HeliosTheme.truffleTrouble : textMuted,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                  ],
-                  if (yieldKwh != null) ...[
-                    Icon(Icons.bolt, color: accentSolar, size: 18),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${yieldKwh.toStringAsFixed(2)} kWh',
-                      style: TextStyle(
-                        color: textMuted,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                  ],
-                  // Botón Selector de Modo de Tema
-                  IconButton(
-                    icon: Icon(
-                      mqttService.themeMode == DashboardThemeMode.forceDay
-                          ? Icons.wb_sunny
-                          : mqttService.themeMode == DashboardThemeMode.forceNight
-                              ? Icons.nightlight_round
-                              : Icons.brightness_auto,
-                      color: mqttService.themeMode == DashboardThemeMode.forceDay
-                          ? HeliosTheme.burningFlame
-                          : mqttService.themeMode == DashboardThemeMode.forceNight
-                              ? HeliosTheme.oatmeal
-                              : accentSolar,
-                    ),
-                    tooltip: 'Modo de tema',
-                    onPressed: () => _showThemeMenu(context, mqttService, isNight),
+              padding: const EdgeInsets.only(right: 12.0),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: palette.headerCapsuleBg,
+                    borderRadius: BorderRadius.circular(30),
+                    border: Border.all(color: palette.headerCapsuleBorder, width: 1),
+                    boxShadow: palette.headerCapsuleShadow,
                   ),
-                  Icon(
-                    mqttService.isConnected
-                        ? Icons.cloud_done
-                        : Icons.cloud_off,
-                    color: mqttService.isConnected
-                        ? const Color(0xFF4ADE80)
-                        : HeliosTheme.truffleTrouble,
-                    size: 24,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (tempC != null) ...[
+                        Icon(
+                          Icons.thermostat,
+                          color: tempC > 65 ? const Color(0xFFDC2626) : palette.headerCapsuleText,
+                          size: 17,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${tempC.toStringAsFixed(1)}°C',
+                          style: TextStyle(
+                            color: tempC > 65 ? const Color(0xFFDC2626) : palette.headerCapsuleText,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      if (yieldKwh != null) ...[
+                        const Icon(Icons.bolt, color: Color(0xFFD97706), size: 17),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${yieldKwh.toStringAsFixed(1)} kWh',
+                          style: TextStyle(
+                            color: palette.headerCapsuleText,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Icon(
+                        mqttService.isInverterConnected
+                            ? Icons.cloud_done
+                            : Icons.cloud_off,
+                        color: mqttService.isInverterConnected
+                            ? const Color(0xFF059669) // Verde esmeralda intenso
+                            : const Color(0xFFDC2626), // Rojo alerta
+                        size: 20,
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 12),
-                ],
+                ),
               ),
             ),
           ],
         ),
         drawer: Drawer(
-          backgroundColor: isNight ? HeliosTheme.abyssalAnchorfishBlue : HeliosTheme.palladian,
+          backgroundColor: palette.bgColor,
           child: Container(
-            decoration: BoxDecoration(
-              gradient: bgGradient,
-            ),
+            decoration: palette.rootDecoration,
             child: ListView(
               padding: EdgeInsets.zero,
               children: [
                 DrawerHeader(
                   decoration: BoxDecoration(
-                    gradient: headerGradient,
+                    color: palette.cardColor,
+                    border: Border(
+                      bottom: BorderSide(color: palette.cardBorderColor, width: 1),
+                    ),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -425,13 +350,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       Icon(
                         isNight ? Icons.nightlight_round : Icons.solar_power,
                         size: 44,
-                        color: isNight ? HeliosTheme.burningFlame : HeliosTheme.palladian,
+                        color: palette.accentSolar,
                       ),
                       const SizedBox(height: 12),
                       Text(
                         'HeliOs OS',
                         style: TextStyle(
-                          color: isNight ? HeliosTheme.palladian : Colors.white,
+                          color: palette.textPrimary,
                           fontSize: 22,
                           fontWeight: FontWeight.bold,
                           letterSpacing: 1.2,
@@ -488,168 +413,156 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         body: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 6),
-                // --- HEADER BANNER ---
-                Container(
-                  height: 120,
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    gradient: headerGradient,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: isNight
-                          ? HeliosTheme.burningFlame.withValues(alpha: 0.3)
-                          : HeliosTheme.oatmeal.withValues(alpha: 0.4),
-                      width: 1.5,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // PAISAJE MINIMALISTA GENERADO POR CÓDIGO CON DESVANECIDO INFERIOR
+              WeatherHeaderScene(
+                weatherState: activeWeatherState,
+                isNight: isNight,
+                hillBottomColor: palette.hillBottomColor,
+                height: 200,
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 8),
+                    Text(
+                      'Pronóstico de Irradiancia y Generación por Hora',
+                      style: TextStyle(
+                        color: textPrimary,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: isNight
-                            ? Colors.black.withValues(alpha: 0.3)
-                            : HeliosTheme.truffleTrouble.withValues(alpha: 0.18),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        isNight ? Icons.nightlight_round : Icons.solar_power,
-                        size: 44,
-                        color: isNight
-                            ? HeliosTheme.burningFlame
-                            : HeliosTheme.palladian,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'SISTEMA DE MONITOREO HELIOS',
-                        style: TextStyle(
-                          color: isNight ? HeliosTheme.palladian : Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'Pronóstico de Irradiancia y Generación por Hora',
-                  style: TextStyle(
-                    color: textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                Text(
-                  'Modelo Astronómico Clear Sky',
-                  style: TextStyle(color: textMuted, fontSize: 12),
-                ),
-                const SizedBox(height: 12),
+                    Text(
+                      'Modelo Híbrido Clear Sky + Open-Meteo WMO',
+                      style: TextStyle(color: textMuted, fontSize: 12),
+                    ),
+                    const SizedBox(height: 12),
 
-                // --- CARRUSEL DE PRONÓSTICO ---
-                Container(
-                  height: 128,
-                  decoration: BoxDecoration(
-                    color: cardColor,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: cardBorderColor, width: 1),
-                    boxShadow: [
-                      BoxShadow(
-                        color: isNight
-                            ? Colors.black.withValues(alpha: 0.25)
-                            : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
-                        blurRadius: 8,
-                        offset: const Offset(0, 3),
-                      )
-                    ],
-                  ),
-                  child: _forecastData.isEmpty
-                      ? Center(
-                          child: Text(
-                            "Sincronizando efemérides solares...",
-                            style: TextStyle(color: textMuted),
-                          ),
-                        )
-                      : ListView.builder(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: _forecastData.length,
-                          itemBuilder: (context, index) {
-                            final item = _forecastData[index];
-                            final double fGhi =
-                                (item['ghi'] as num).toDouble();
-                            final double pExpFore =
-                                (item['p_exp'] as num).toDouble();
-                            final bool isDay = fGhi > 0;
-
-                            final String horaStr =
-                                item['hora_str'] as String? ?? '??:00';
-                            final String fechaStr =
-                                item['fecha_str'] as String? ?? '';
-
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14.0,
-                                vertical: 10.0,
+                    // --- CARRUSEL DE PRONÓSTICO (TAREA 3) ---
+                    Container(
+                      height: 132,
+                      decoration: BoxDecoration(
+                        color: cardColor,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: cardBorderColor, width: 1),
+                        boxShadow: [
+                          BoxShadow(
+                            color: isNight
+                                ? Colors.black.withValues(alpha: 0.25)
+                                : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
+                            blurRadius: 8,
+                            offset: const Offset(0, 3),
+                          )
+                        ],
+                      ),
+                      child: _forecastData.isEmpty
+                          ? Center(
+                              child: Text(
+                                "Sincronizando efemérides solares...",
+                                style: TextStyle(color: textMuted),
                               ),
-                              child: Column(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceAround,
-                                children: [
-                                  Text(
-                                    horaStr,
-                                    style: TextStyle(
-                                      color: textMuted,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                  if (fechaStr.isNotEmpty)
-                                    Text(
-                                      fechaStr,
-                                      style: TextStyle(
-                                        color: textMuted,
-                                        fontSize: 10,
-                                      ),
-                                    ),
-                                  Icon(
-                                    isDay
-                                        ? Icons.wb_sunny
-                                        : Icons.nightlight_round,
-                                    color: isDay
-                                        ? HeliosTheme.burningFlame
-                                        : (isNight ? HeliosTheme.oatmeal : HeliosTheme.blueFantastic),
-                                    size: 26,
-                                  ),
-                                  Text(
-                                    '${fGhi.round()} W/m²',
-                                    style: TextStyle(
-                                      color: textPrimary,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  Text(
-                                    'Est: ${pExpFore.round()} W',
-                                    style: TextStyle(
-                                      color: isNight ? HeliosTheme.burningFlame : HeliosTheme.truffleTrouble,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
+                            )
+                          : ScrollConfiguration(
+                              behavior: ScrollConfiguration.of(context).copyWith(
+                                dragDevices: {
+                                  PointerDeviceKind.touch,
+                                  PointerDeviceKind.mouse,
+                                  PointerDeviceKind.trackpad,
+                                },
                               ),
-                            );
-                          },
-                        ),
-                ),
+                              child: ListView.builder(
+                                scrollDirection: Axis.horizontal,
+                                physics: const BouncingScrollPhysics(),
+                                itemCount: _forecastData.length,
+                                itemBuilder: (context, index) {
+                                  final item = _forecastData[index];
+                                  final double fGhi =
+                                      (item['ghi'] as num).toDouble();
+                                  final double pExpFore =
+                                      (item['p_exp'] as num).toDouble();
+                                  final bool isDay = fGhi > 0;
+
+                                  final String horaStr =
+                                      item['hora_str'] as String? ?? '??:00';
+                                  final String fechaStr =
+                                      item['fecha_str'] as String? ?? '';
+                                  final String itemWeatherState =
+                                      (item['weather_state'] as String?) ??
+                                          (fGhi > 10 ? 'sunny' : 'clear_night');
+                                  final int itemCloudCover =
+                                      (item['cloud_cover'] as num?)?.toInt() ?? 0;
+
+                                  return Container(
+                                    width: 82.0,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6.0,
+                                      vertical: 8.0,
+                                    ),
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceAround,
+                                      children: [
+                                        Text(
+                                          horaStr,
+                                          style: TextStyle(
+                                            color: textMuted,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        if (fechaStr.isNotEmpty)
+                                          Text(
+                                            fechaStr,
+                                            style: TextStyle(
+                                              color: textMuted,
+                                              fontSize: 10,
+                                            ),
+                                          ),
+                                        _buildHourlyWeatherIcon(
+                                          itemWeatherState,
+                                          itemCloudCover,
+                                          isNight,
+                                          isDay,
+                                        ),
+                                        if (itemWeatherState == 'rain' ||
+                                            itemWeatherState == 'storm' ||
+                                            (itemCloudCover > 0 && !isDay))
+                                          Text(
+                                            '$itemCloudCover%',
+                                            style: const TextStyle(
+                                              color: Color(0xFF38BDF8),
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        Text(
+                                          '${fGhi.round()} W/m²',
+                                          style: TextStyle(
+                                            color: textPrimary,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        Text(
+                                          'Est: ${pExpFore.round()} W',
+                                          style: TextStyle(
+                                            color: palette.accentSolar,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                    ),
                 const SizedBox(height: 24),
                 Text(
                   'Condiciones actuales',
@@ -832,8 +745,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   forecastData: _forecastData,
                 ),
                 const SizedBox(height: 40),
-              ],
-            ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1174,5 +1089,472 @@ class MultimodalChartContainer extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+// ===========================================================
+// ÍCONOS Y ESTILOS DINÁMICOS POR HORA (OPEN-METEO WMO)
+// ===========================================================
+Widget _buildHourlyWeatherIcon(
+  String weatherState,
+  int cloudCover,
+  bool isNight,
+  bool isDay,
+) {
+  switch (weatherState) {
+    case 'sunny':
+      return const Icon(
+        Icons.wb_sunny,
+        color: HeliosTheme.burningFlame,
+        size: 26,
+      );
+    case 'partly_cloudy':
+      return SizedBox(
+        width: 28,
+        height: 28,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Positioned(
+              top: 2,
+              left: 2,
+              child: Icon(Icons.wb_sunny, color: HeliosTheme.burningFlame, size: 18),
+            ),
+            Positioned(
+              bottom: 1,
+              right: 1,
+              child: Icon(
+                Icons.cloud,
+                color: isNight ? HeliosTheme.oatmeal : const Color(0xFF94A3B8),
+                size: 18,
+              ),
+            ),
+          ],
+        ),
+      );
+    case 'cloudy':
+      return Icon(
+        Icons.cloud,
+        color: isNight ? HeliosTheme.oatmeal : const Color(0xFF64748B),
+        size: 26,
+      );
+    case 'rain':
+      return const Icon(
+        Icons.water_drop,
+        color: Color(0xFF38BDF8),
+        size: 26,
+      );
+    case 'storm':
+      return const Icon(
+        Icons.thunderstorm,
+        color: Color(0xFFA855F7),
+        size: 26,
+      );
+    case 'clear_night':
+      return const Icon(
+        Icons.nightlight_round,
+        color: Color(0xFF818CF8),
+        size: 26,
+      );
+    case 'cloudy_night':
+      return const Icon(
+        Icons.nights_stay,
+        color: Color(0xFF94A3B8),
+        size: 26,
+      );
+    default:
+      return Icon(
+        isDay ? Icons.wb_sunny : Icons.nightlight_round,
+        color: isDay
+            ? HeliosTheme.burningFlame
+            : (isNight ? HeliosTheme.oatmeal : HeliosTheme.blueFantastic),
+        size: 26,
+      );
+  }
+}
+
+// ===========================================================
+// PAISAJE MINIMALISTA VECTORIAL / PROCEDURAL (CUSTOM PAINTER)
+// ===========================================================
+class WeatherHeaderScene extends StatelessWidget {
+  final String weatherState;
+  final bool isNight;
+  final Color? hillBottomColor;
+  final double height;
+
+  const WeatherHeaderScene({
+    super.key,
+    required this.weatherState,
+    required this.isNight,
+    this.hillBottomColor,
+    this.height = 200,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: height,
+      width: double.infinity,
+      child: ShaderMask(
+        shaderCallback: (Rect bounds) {
+          return const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            stops: [0.0, 0.55, 1.0],
+            colors: [
+              Colors.black,
+              Colors.black,
+              Colors.transparent,
+            ],
+          ).createShader(bounds);
+        },
+        blendMode: BlendMode.dstIn,
+        child: CustomPaint(
+          size: Size(double.infinity, height),
+          painter: _WeatherScenePainter(
+            weatherState: weatherState,
+            isNight: isNight,
+            hillBottomColor: hillBottomColor,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WeatherScenePainter extends CustomPainter {
+  final String weatherState;
+  final bool isNight;
+  final Color? hillBottomColor;
+
+  _WeatherScenePainter({
+    required this.weatherState,
+    required this.isNight,
+    this.hillBottomColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    _drawSky(canvas, size);
+    _drawCelestialAndWeather(canvas, size);
+    _drawHills(canvas, size);
+    _drawSolarPanels(canvas, size);
+    _drawTrees(canvas, size);
+
+    // Gradiente sutil superior para legibilidad óptima de AppBar
+    final Rect topRect = Rect.fromLTWH(0, 0, size.width, 68);
+    final Paint topVignette = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          Colors.black.withValues(alpha: 0.40),
+          Colors.transparent,
+        ],
+      ).createShader(topRect);
+    canvas.drawRect(topRect, topVignette);
+  }
+
+  void _drawSky(Canvas canvas, Size size) {
+    final Rect skyRect = Rect.fromLTWH(0, 0, size.width, size.height);
+    final List<Color> colors;
+
+    switch (weatherState) {
+      case 'storm':
+        colors = const [Color(0xFF0F0B1E), Color(0xFF1E1B4B), Color(0xFF312E81)];
+        break;
+      case 'rain':
+        colors = const [Color(0xFF0F172A), Color(0xFF1E293B), Color(0xFF334155)];
+        break;
+      case 'cloudy':
+        colors = isNight
+            ? const [Color(0xFF090D16), Color(0xFF131D2D), Color(0xFF1E293B)]
+            : const [Color(0xFF334155), Color(0xFF64748B), Color(0xFF94A3B8)];
+        break;
+      case 'partly_cloudy':
+        colors = isNight
+            ? const [Color(0xFF0B132B), Color(0xFF1C2541), Color(0xFF2C3B4D)]
+            : const [Color(0xFF1E3A8A), Color(0xFF3B82F6), Color(0xFF93C5FD)];
+        break;
+      case 'cloudy_night':
+        colors = const [Color(0xFF090D16), Color(0xFF131D2D), Color(0xFF1E293B)];
+        break;
+      case 'clear_night':
+        colors = const [Color(0xFF030712), Color(0xFF0B132B), Color(0xFF1C2541)];
+        break;
+      case 'sunny':
+      default:
+        colors = isNight
+            ? const [Color(0xFF030712), Color(0xFF0B132B), Color(0xFF1C2541)]
+            : const [Color(0xFF1D4ED8), Color(0xFF38BDF8), Color(0xFFBAE6FD)];
+        break;
+    }
+
+    final Paint skyPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: colors,
+      ).createShader(skyRect);
+    canvas.drawRect(skyRect, skyPaint);
+  }
+
+  void _drawCelestialAndWeather(Canvas canvas, Size size) {
+    final bool isNightMode = weatherState.contains('night') || isNight;
+
+    if (isNightMode) {
+      final Paint starPaint = Paint()..color = Colors.white.withValues(alpha: 0.85);
+      final List<Offset> stars = [
+        Offset(size.width * 0.08, size.height * 0.16),
+        Offset(size.width * 0.18, size.height * 0.28),
+        Offset(size.width * 0.28, size.height * 0.14),
+        Offset(size.width * 0.42, size.height * 0.22),
+        Offset(size.width * 0.58, size.height * 0.18),
+        Offset(size.width * 0.70, size.height * 0.12),
+        Offset(size.width * 0.88, size.height * 0.25),
+        Offset(size.width * 0.94, size.height * 0.15),
+      ];
+      for (final star in stars) {
+        canvas.drawCircle(star, 1.2, starPaint);
+      }
+
+      final Offset moonCenter = Offset(size.width * 0.82, size.height * 0.32);
+      final Paint moonHalo = Paint()
+        ..color = const Color(0xFFFEF08A).withValues(alpha: 0.25)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12);
+      canvas.drawCircle(moonCenter, 20, moonHalo);
+
+      final Paint moonBody = Paint()..color = const Color(0xFFFEF9C3);
+      canvas.drawCircle(moonCenter, 14, moonBody);
+
+      final Paint moonCut = Paint()..color = const Color(0xFF0B132B);
+      canvas.drawCircle(Offset(moonCenter.dx - 5, moonCenter.dy - 3), 12, moonCut);
+    } else {
+      final Offset sunCenter = Offset(size.width * 0.82, size.height * 0.30);
+      final Paint sunGlow = Paint()
+        ..color = const Color(0xFFFBBF24).withValues(alpha: 0.35)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18);
+      canvas.drawCircle(sunCenter, 32, sunGlow);
+
+      final Paint sunCore = Paint()..color = const Color(0xFFFDE047);
+      canvas.drawCircle(sunCenter, 16, sunCore);
+    }
+
+    if (weatherState == 'partly_cloudy' ||
+        weatherState == 'cloudy' ||
+        weatherState == 'rain' ||
+        weatherState == 'storm' ||
+        weatherState == 'cloudy_night') {
+      final Color cloudColor = (weatherState == 'rain' || weatherState == 'storm')
+          ? const Color(0xFF334155).withValues(alpha: 0.8)
+          : isNightMode
+              ? const Color(0xFF1E293B).withValues(alpha: 0.7)
+              : Colors.white.withValues(alpha: 0.75);
+
+      _drawCloud(canvas, Offset(size.width * 0.25, size.height * 0.32), 24, cloudColor);
+      _drawCloud(canvas, Offset(size.width * 0.78, size.height * 0.34), 30, cloudColor);
+      if (weatherState == 'cloudy' || weatherState == 'rain' || weatherState == 'storm') {
+        _drawCloud(canvas, Offset(size.width * 0.50, size.height * 0.26), 28, cloudColor);
+      }
+    }
+
+    if (weatherState == 'rain' || weatherState == 'storm') {
+      final Paint rainPaint = Paint()
+        ..color = const Color(0xFF93C5FD).withValues(alpha: 0.55)
+        ..strokeWidth = 1.4
+        ..strokeCap = StrokeCap.round;
+
+      for (int i = 0; i < 24; i++) {
+        final double rx = (size.width * (i * 0.042 + 0.02)) % size.width;
+        final double ry = size.height * 0.20 + (i % 6) * 12.0;
+        canvas.drawLine(Offset(rx, ry), Offset(rx - 7, ry + 16), rainPaint);
+      }
+    }
+
+    if (weatherState == 'storm') {
+      final Paint boltPaint = Paint()
+        ..color = const Color(0xFFFDE047)
+        ..strokeWidth = 2.5
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke;
+
+      final Path bolt = Path()
+        ..moveTo(size.width * 0.52, size.height * 0.22)
+        ..lineTo(size.width * 0.49, size.height * 0.34)
+        ..lineTo(size.width * 0.53, size.height * 0.34)
+        ..lineTo(size.width * 0.47, size.height * 0.50);
+      canvas.drawPath(bolt, boltPaint);
+    }
+  }
+
+  void _drawCloud(Canvas canvas, Offset center, double baseRadius, Color color) {
+    final Paint cloudPaint = Paint()..color = color;
+    canvas.drawCircle(center, baseRadius, cloudPaint);
+    canvas.drawCircle(Offset(center.dx - baseRadius * 0.7, center.dy + baseRadius * 0.2), baseRadius * 0.65, cloudPaint);
+    canvas.drawCircle(Offset(center.dx + baseRadius * 0.7, center.dy + baseRadius * 0.2), baseRadius * 0.65, cloudPaint);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromCenter(center: Offset(center.dx, center.dy + baseRadius * 0.3), width: baseRadius * 2.5, height: baseRadius * 0.8),
+        Radius.circular(baseRadius * 0.4),
+      ),
+      cloudPaint,
+    );
+  }
+
+  void _drawHills(Canvas canvas, Size size) {
+    final bool isNightMode = weatherState.contains('night') || isNight;
+
+    final Color hill1Color = isNightMode
+        ? const Color(0xFF162544)
+        : (weatherState == 'rain' || weatherState == 'storm')
+            ? const Color(0xFF334E43)
+            : const Color(0xFF65A30D);
+    final Path hill1 = Path()
+      ..moveTo(0, size.height * 0.48)
+      ..quadraticBezierTo(size.width * 0.25, size.height * 0.38, size.width * 0.55, size.height * 0.46)
+      ..quadraticBezierTo(size.width * 0.80, size.height * 0.52, size.width, size.height * 0.42)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(hill1, Paint()..color = hill1Color);
+
+    final Color hill2Color = isNightMode
+        ? const Color(0xFF111E38)
+        : (weatherState == 'rain' || weatherState == 'storm')
+            ? const Color(0xFF243B33)
+            : const Color(0xFF22C55E);
+    final Path hill2 = Path()
+      ..moveTo(0, size.height * 0.60)
+      ..quadraticBezierTo(size.width * 0.35, size.height * 0.50, size.width * 0.68, size.height * 0.62)
+      ..quadraticBezierTo(size.width * 0.88, size.height * 0.68, size.width, size.height * 0.56)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(hill2, Paint()..color = hill2Color);
+
+    final Color hill3Color = hillBottomColor ??
+        (isNightMode
+            ? const Color(0xFF0C1628)
+            : (weatherState == 'rain' || weatherState == 'storm')
+                ? const Color(0xFF1A2E28)
+                : const Color(0xFF15803D));
+    final Path hill3 = Path()
+      ..moveTo(0, size.height * 0.72)
+      ..quadraticBezierTo(size.width * 0.28, size.height * 0.62, size.width * 0.58, size.height * 0.74)
+      ..quadraticBezierTo(size.width * 0.85, size.height * 0.68, size.width, size.height * 0.76)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(hill3, Paint()..color = hill3Color);
+  }
+
+  void _drawSolarPanels(Canvas canvas, Size size) {
+    final Paint polePaint = Paint()
+      ..color = const Color(0xFF64748B)
+      ..strokeWidth = 2.0;
+
+    final Paint panelBorder = Paint()
+      ..color = const Color(0xFF94A3B8)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+
+    final Paint panelFill = Paint()..color = const Color(0xFF1E3A8A);
+    final Paint panelGrid = Paint()
+      ..color = const Color(0xFF60A5FA).withValues(alpha: 0.6)
+      ..strokeWidth = 0.8;
+
+    final List<Offset> bases = [
+      Offset(size.width * 0.20, size.height * 0.58),
+      Offset(size.width * 0.26, size.height * 0.57),
+    ];
+
+    for (final base in bases) {
+      canvas.drawLine(base, Offset(base.dx, base.dy - 12), polePaint);
+
+      final Path panel = Path()
+        ..moveTo(base.dx - 12, base.dy - 10)
+        ..lineTo(base.dx + 10, base.dy - 16)
+        ..lineTo(base.dx + 14, base.dy - 6)
+        ..lineTo(base.dx - 8, base.dy - 0)
+        ..close();
+
+      canvas.drawPath(panel, panelFill);
+      canvas.drawPath(panel, panelBorder);
+      canvas.drawLine(
+        Offset(base.dx - 1, base.dy - 13),
+        Offset(base.dx + 3, base.dy - 3),
+        panelGrid,
+      );
+    }
+  }
+
+  void _drawTrees(Canvas canvas, Size size) {
+    final bool isNightMode = weatherState.contains('night') || isNight;
+
+    final List<Map<String, double>> treePositions = [
+      {'x': 0.08, 'y': 0.56, 'scale': 0.85},
+      {'x': 0.14, 'y': 0.54, 'scale': 0.75},
+      {'x': 0.35, 'y': 0.57, 'scale': 0.90},
+      {'x': 0.44, 'y': 0.62, 'scale': 1.05},
+      {'x': 0.52, 'y': 0.64, 'scale': 0.95},
+      {'x': 0.64, 'y': 0.65, 'scale': 1.10},
+      {'x': 0.76, 'y': 0.62, 'scale': 0.90},
+      {'x': 0.85, 'y': 0.58, 'scale': 0.80},
+      {'x': 0.92, 'y': 0.60, 'scale': 0.85},
+    ];
+
+    final Paint trunkPaint = Paint()
+      ..color = const Color(0xFF5C4033)
+      ..strokeWidth = 3.0
+      ..strokeCap = StrokeCap.round;
+
+    final Color canopyPrimary = isNightMode
+        ? const Color(0xFF1E3A5F)
+        : (weatherState == 'rain' || weatherState == 'storm')
+            ? const Color(0xFF1B4332)
+            : const Color(0xFF2D6A4F);
+
+    final Color canopySecondary = isNightMode
+        ? const Color(0xFF142844)
+        : (weatherState == 'rain' || weatherState == 'storm')
+            ? const Color(0xFF143627)
+            : const Color(0xFF40916C);
+
+    final Paint canopyPaint = Paint()..color = canopyPrimary;
+    final Paint canopyPaint2 = Paint()..color = canopySecondary;
+    final Paint fruitPaint = Paint()..color = const Color(0xFFFBBF24);
+
+    for (final t in treePositions) {
+      final double tx = size.width * t['x']!;
+      final double ty = size.height * t['y']!;
+      final double sc = t['scale']!;
+
+      final double trunkH = 18.0 * sc;
+      final double canopyR = 14.0 * sc;
+
+      canvas.drawLine(Offset(tx, ty), Offset(tx, ty - trunkH), trunkPaint);
+
+      final Offset cCenter = Offset(tx, ty - trunkH - canopyR * 0.6);
+      canvas.drawCircle(Offset(cCenter.dx - 4 * sc, cCenter.dy), canopyR * 0.85, canopyPaint2);
+      canvas.drawCircle(Offset(cCenter.dx + 4 * sc, cCenter.dy), canopyR * 0.85, canopyPaint2);
+      canvas.drawCircle(cCenter, canopyR, canopyPaint);
+
+      final List<Offset> fruits = [
+        Offset(cCenter.dx - 5 * sc, cCenter.dy - 3 * sc),
+        Offset(cCenter.dx + 4 * sc, cCenter.dy - 5 * sc),
+        Offset(cCenter.dx, cCenter.dy + 3 * sc),
+        Offset(cCenter.dx - 3 * sc, cCenter.dy + 5 * sc),
+        Offset(cCenter.dx + 6 * sc, cCenter.dy + 2 * sc),
+      ];
+      for (final f in fruits) {
+        canvas.drawCircle(f, 1.8 * sc, fruitPaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _WeatherScenePainter oldDelegate) {
+    return oldDelegate.weatherState != weatherState ||
+        oldDelegate.isNight != isNight;
   }
 }

@@ -82,23 +82,23 @@ def generate_html():
             <div class="grid-2">
                 <div class="field-group">
                     <label>Voc por Panel (V)</label>
-                    <input type="number" step="0.1" name="voc" value="45.5" required>
+                    <input type="number" step="0.1" name="voc" value="49.6" required>
                 </div>
                 <div class="field-group">
                     <label>Isc por Panel (A)</label>
-                    <input type="number" step="0.1" name="isc" value="10.8" required>
+                    <input type="number" step="0.1" name="isc" value="14.0" required>
                 </div>
                 <div class="field-group">
                     <label>Potencia Pico (Wp)</label>
-                    <input type="number" step="0.1" name="wp" value="450.0" required>
+                    <input type="number" step="0.1" name="wp" value="550.0" required>
                 </div>
                 <div class="field-group">
                     <label>Paneles en Serie</label>
-                    <input type="number" step="1" name="serie" value="4" required>
+                    <input type="number" step="1" name="serie" value="18" required>
                 </div>
                 <div class="field-group" style="grid-column: span 2;">
                     <label>Cadenas en Paralelo</label>
-                    <input type="number" step="1" name="paralelo" value="1" required>
+                    <input type="number" step="1" name="paralelo" value="4" required>
                 </div>
             </div>
 
@@ -124,8 +124,8 @@ def generate_html():
 </html>"""
 
 def reiniciar_sistema():
-    time.sleep(4)
-    os.system("reboot")
+    time.sleep(2)
+    os.system("sync && reboot")
 
 class Portal(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -149,14 +149,23 @@ class Portal(BaseHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', 0))
             data = parse_qs(self.rfile.read(length).decode('utf-8'))
             
+            voc_val = float(data.get('voc', ['49.6'])[0] or 49.6)
+            isc_val = float(data.get('isc', ['14.0'])[0] or 14.0)
+            wp_val = float(data.get('wp', ['550.0'])[0] or 550.0)
+            serie_val = int(data.get('serie', ['18'])[0] or 18)
+            paralelo_val = int(data.get('paralelo', ['4'])[0] or 4)
+
             config = {
-                'ssid': data.get('ssid', [''])[0],
+                'ssid': data.get('ssid', [''])[0].strip(),
                 'pass': data.get('pass', [''])[0],
-                'voc': float(data.get('voc', ['0'])[0]),
-                'isc': float(data.get('isc', ['0'])[0]),
-                'wp': float(data.get('wp', ['0'])[0]),
-                'serie': int(data.get('serie', ['0'])[0]),
-                'paralelo': int(data.get('paralelo', ['0'])[0])
+                'voc': voc_val,
+                'isc': isc_val,
+                'wp': wp_val,
+                'serie': serie_val,
+                'paralelo': paralelo_val,
+                'lat': 19.6800,
+                'lon': -99.0100,
+                'city': 'Ojo de Agua, EdoMex'
             }
             
             with bloqueo_archivo:
@@ -166,11 +175,14 @@ class Portal(BaseHTTPRequestHandler):
                     return
                 credenciales_guardadas = True
                 
-                with open('/data/wifi_config.json', 'w') as f:
-                    json.dump(config, f)
+                os.makedirs('/data', exist_ok=True)
+                tmp_path = '/data/wifi_config.json.tmp'
+                final_path = '/data/wifi_config.json'
+                with open(tmp_path, 'w') as f:
+                    json.dump(config, f, indent=2)
                 
-                # PERMISOS PÚBLICOS: Hacemos el archivo legible para Flutter (Usuario Weston)
-                os.chmod('/data/wifi_config.json', 0o666)
+                os.chmod(tmp_path, 0o666)
+                os.replace(tmp_path, final_path)
             
             response_msg = b"<!DOCTYPE html><html><body style='background:#121212;color:#00bcd4;text-align:center;padding:50px;font-family:sans-serif;'><h2>Configuracion Aplicada</h2><p style='color:#fff;'>HeliOs procesara los parametros del arreglo solar y el Gateway se reiniciara.</p></body></html>"
             

@@ -1,8 +1,29 @@
 import 'package:flutter/material.dart';
+import '../database/db_platform.dart';
 import '../theme/helios_theme.dart';
 
-class ProvisioningScreen extends StatelessWidget {
+class ProvisioningScreen extends StatefulWidget {
   const ProvisioningScreen({super.key});
+
+  @override
+  State<ProvisioningScreen> createState() => _ProvisioningScreenState();
+}
+
+class _ProvisioningScreenState extends State<ProvisioningScreen> {
+  bool _isRebooting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ensurePortalRunning();
+  }
+
+  Future<void> _ensurePortalRunning() async {
+    final running = await isCaptivePortalRunning();
+    if (!running) {
+      await launchCaptivePortalService();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,7 +68,7 @@ class ProvisioningScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 14),
                 const Text(
-                  'El equipo no tiene conexión a internet. Siga estos pasos:',
+                  'El equipo no tiene conexión a internet o requiere configuración de red. Siga estos pasos:',
                   style: TextStyle(fontSize: 16, color: HeliosTheme.oatmeal),
                   textAlign: TextAlign.center,
                 ),
@@ -64,6 +85,46 @@ class ProvisioningScreen extends StatelessWidget {
                 _buildStepCard(
                   '4',
                   'Ingrese las credenciales de la planta. El equipo se reiniciará automáticamente.',
+                ),
+                const SizedBox(height: 36),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: HeliosTheme.burningFlame,
+                    foregroundColor: HeliosTheme.abyssalAnchorfishBlue,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 28,
+                      vertical: 16,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 4,
+                  ),
+                  icon: _isRebooting
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: HeliosTheme.abyssalAnchorfishBlue,
+                          ),
+                        )
+                      : const Icon(Icons.restart_alt, size: 24),
+                  label: Text(
+                    _isRebooting
+                        ? 'Reiniciando equipo...'
+                        : 'Reiniciar Equipo / Relanzar Red HeliOs_Setup',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
+                  onPressed: _isRebooting
+                      ? null
+                      : () async {
+                          setState(() => _isRebooting = true);
+                          await rebootSystem();
+                        },
                 ),
               ],
             ),

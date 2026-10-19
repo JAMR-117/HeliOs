@@ -1,6 +1,6 @@
 [Unit]
 Description=HeliOs Solar Position Algorithm Daemon
-After=network.target mosquitto.service helios-network.service
+After=local-fs.target mosquitto.service
 Wants=mosquitto.service
 
 [Service]

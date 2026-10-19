@@ -165,3 +165,31 @@ String? readConfigFile(String path) {
   // En Web se utilizan los datos por defecto / fallback
   return null;
 }
+
+bool writeConfigFile(String path, String content) {
+  return true;
+}
+
+Future<List<String>> scanWifiNetworks() async {
+  return ['HeliOs_Local_Wifi', 'Planta_Solar_Industrial', 'Red_Invitados'];
+}
+
+Future<bool> reconnectWifiHot() async {
+  return true;
+}
+
+Future<bool> checkWifiConnected() async {
+  return true;
+}
+
+Future<bool> isCaptivePortalRunning() async {
+  return true;
+}
+
+Future<bool> launchCaptivePortalService() async {
+  return true;
+}
+
+Future<void> rebootSystem() async {}
+
+Future<void> resetToProvisioningMode() async {}

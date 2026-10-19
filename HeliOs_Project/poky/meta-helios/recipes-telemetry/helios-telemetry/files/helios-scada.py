@@ -16,13 +16,14 @@ SUNSPEC_ERRORS = {
     1:   "Sobrevoltaje de Red",
     13:  "Fuga a Tierra Detectada",
     14:  "Sobrecalentamiento del Inversor",
-    101: "Pérdida de Panel en Serie Detectada",
-    102: "Sombreo o Suciedad en Arreglo Fotovoltaico",
-    103: "Alerta Térmica: Sobrecalentamiento en Inversor (>65°C)",
+    101: "Pérdida de Panel en Serie Detectada (Caída de Voltaje DC)",
+    102: "Sombreo o Suciedad en Arreglo Fotovoltaico (Baja Potencia)",
+    103: "Sobrecalentamiento en Inversor (> 65°C)",
 }
 
 # Estado SPA compartido (actualizado por tópico helios/spa/expected)
 latest_spa = {"ghi": 0.0, "v_exp": 0.0, "p_exp": 0.0, "is_night": True}
+last_scada_code = None
 
 def init_db():
     try:
@@ -48,6 +49,10 @@ def init_db():
 
 def guardar_alerta(timestamp, code, description):
     """Inserta una alerta en SQLite para que ScadaErrorsScreen la muestre en historial."""
+    global last_scada_code
+    if last_scada_code == code:
+        return  # Anti-duplicado consecutivo: no saturar SQLite cada 2s
+    last_scada_code = code
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -55,6 +60,7 @@ def guardar_alerta(timestamp, code, description):
                   (timestamp, int(code), str(description)))
         conn.commit()
         conn.close()
+        print(f"[helios-scada] Alerta guardada en SQLite: Código {code} - {description}")
     except Exception as e:
         print(f"[ERROR] guardar_alerta: {e}")
 
@@ -138,7 +144,8 @@ def on_message(client, userdata, msg):
         client.publish("helios/scada/alerts", json.dumps(alert), retain=True)
         guardar_alerta(now_str, alert["code"], alert["description"])
     else:
-        # Sin falla: publicar estado limpio
+        # Sin falla: publicar estado limpio y resetear código previo
+        last_scada_code = None
         if is_night and fault_code == 0:
             desc = "Modo Nocturno - Paneles en Estiba"
         else:

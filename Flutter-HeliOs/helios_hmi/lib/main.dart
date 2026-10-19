@@ -63,31 +63,34 @@ class RootController extends StatefulWidget {
 
 class _RootControllerState extends State<RootController> {
   bool _isProvisioningMode = false;
-  Timer? _timer;
+  Timer? _provisioningPollTimer;
 
   @override
   void initState() {
     super.initState();
-    _checkProvisioningStatus();
+    // Determinar modo inicial de operación al encender el equipo
+    _isProvisioningMode = isProvisioningFileMissing();
 
-    _timer = Timer.periodic(const Duration(seconds: 3), (timer) {
-      _checkProvisioningStatus();
-    });
-  }
-
-  void _checkProvisioningStatus() {
-    final bool isMissing = isProvisioningFileMissing();
-
-    if (_isProvisioningMode != isMissing) {
-      setState(() {
-        _isProvisioningMode = isMissing;
+    // Solo si arrancamos en Modo Aprovisionamiento, sondeamos si se completó la configuración.
+    // Una vez en Modo Normal (Dashboard), queda ESTRICTAMENTE bloqueado cualquier regreso automático.
+    if (_isProvisioningMode) {
+      _provisioningPollTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+        if (!isProvisioningFileMissing()) {
+          timer.cancel();
+          _provisioningPollTimer = null;
+          if (mounted) {
+            setState(() {
+              _isProvisioningMode = false;
+            });
+          }
+        }
       });
     }
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _provisioningPollTimer?.cancel();
     super.dispose();
   }
 

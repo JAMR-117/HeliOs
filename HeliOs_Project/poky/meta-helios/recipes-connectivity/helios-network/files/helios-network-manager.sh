@@ -1,78 +1,121 @@
 #!/bin/sh
+# =============================================================================
+# HeliOs Network Manager — Auto-Connect & Captive Portal Daemon
+# =============================================================================
 CONFIG_FILE="/data/wifi_config.json"
 WPA_CONF="/tmp/wpa_supplicant.conf"
+FORCE_RECONNECT=0
 
-systemctl stop wpa_supplicant hostapd dnsmasq 2>/dev/null
-# Matar solo el portal cautivo, NO los daemons de telemetría
-pkill -f portal.py 2>/dev/null
-killall wpa_supplicant udhcpc 2>/dev/null
+if [ "$1" = "--force-reconnect" ] || [ "$1" = "-f" ]; then
+    FORCE_RECONNECT=1
+fi
 
 iniciar_portal() {
-    echo "Iniciando Modo Aprovisionamiento (Portal Cautivo)..."
-    rfkill unblock wlan 2>/dev/null
-    ip link set wlan0 up
-    ip addr add 192.168.4.1/24 dev wlan0
-    
+    echo "[HeliOs Network] Iniciando Modo Aprovisionamiento (Portal Cautivo HeliOs_Setup)..."
+    rm -f "$CONFIG_FILE" 2>/dev/null || true
+    killall wpa_supplicant udhcpc 2>/dev/null || true
+    systemctl stop hostapd dnsmasq 2>/dev/null || true
+    pkill -f portal.py 2>/dev/null || true
+
+    rfkill unblock wlan 2>/dev/null || true
+    ip addr flush dev wlan0 2>/dev/null || true
+    ip link set wlan0 down 2>/dev/null || true
+    sleep 2
+    ip link set wlan0 up 2>/dev/null || true
+    ip addr add 192.168.4.1/24 dev wlan0 2>/dev/null || true
+
     hostapd /etc/helios-network/hostapd.conf &
     dnsmasq -C /etc/helios-network/dnsmasq.conf -d &
-    python3 /etc/helios-network/portal.py
+    exec python3 /etc/helios-network/portal.py
 }
 
+# 1. Si NO se fuerza reconexión, verificar si wlan0 YA tiene una IP válida local
+if [ $FORCE_RECONNECT -eq 0 ]; then
+    if ip -4 a show wlan0 2>/dev/null | grep "inet " | grep -v "192.168.4.1" | grep -qv "169.254"; then
+        echo "[HeliOs Network] wlan0 ya cuenta con IP asignada por DHCP. Manteniendo enlace activo."
+        chmod 777 /data 2>/dev/null || true
+        chmod 666 "$CONFIG_FILE" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
+# 2. Detener servicios previos para iniciar intento de conexión
+systemctl stop hostapd dnsmasq 2>/dev/null || true
+pkill -f portal.py 2>/dev/null || true
+killall wpa_supplicant udhcpc 2>/dev/null || true
+
+# 3. Validar si existe el archivo de configuración con un SSID válido
 if [ -f "$CONFIG_FILE" ]; then
-    SSID=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('ssid', ''))" 2>/dev/null)
-    PASS=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('pass', ''))" 2>/dev/null)
-    
+    SSID=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('ssid', ''))" 2>/dev/null || true)
+    PASS=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('pass', ''))" 2>/dev/null || true)
+
     if [ -z "$SSID" ]; then
-        rm -f "$CONFIG_FILE"
+        echo "[HeliOs Network] Archivo $CONFIG_FILE sin SSID válido. Iniciando portal..."
         iniciar_portal
         exit 0
     fi
 
-    rfkill unblock wlan 2>/dev/null
-    ip link set wlan0 up
+    echo "[HeliOs Network] Intentando conectar a la red Wi-Fi: '$SSID'..."
+    rfkill unblock wlan 2>/dev/null || true
+    ip addr flush dev wlan0 2>/dev/null || true
+    ip link set wlan0 up 2>/dev/null || true
     sleep 2
-    
-    wpa_passphrase "$SSID" "$PASS" > $WPA_CONF
-    wpa_supplicant -B -i wlan0 -c $WPA_CONF
-    udhcpc -i wlan0 -b > /dev/null 2>&1
-    
+
+    # Generar configuración de wpa_supplicant
+    if [ -n "$PASS" ]; then
+        wpa_passphrase "$SSID" "$PASS" > "$WPA_CONF" 2>/dev/null || true
+    else
+        cat << EOF > "$WPA_CONF"
+network={
+    ssid="$SSID"
+    key_mgmt=NONE
+}
+EOF
+    fi
+
+    wpa_supplicant -B -i wlan0 -c "$WPA_CONF" 2>/dev/null || true
+    udhcpc -i wlan0 -b -R 2>/dev/null || udhcpc -i wlan0 -b 2>/dev/null || true
+
+    # 4. Esperar hasta 25 segundos para obtener IP válida por DHCP
     CONECTADO=0
-    for i in $(seq 1 20); do
-        if ip a show wlan0 | grep -q "inet "; then
+    for i in $(seq 1 25); do
+        if ip -4 a show wlan0 2>/dev/null | grep "inet " | grep -v "192.168.4.1" | grep -qv "169.254"; then
             CONECTADO=1
             break
         fi
         sleep 1
     done
-    
-    if [ $CONECTADO -eq 1 ]; then
-        # Abrir permisos de lectura para la app gráfica (Usuario Weston)
-        chmod 777 /data
-        chmod 666 $CONFIG_FILE 2>/dev/null
 
-        # --- Sincronización de hora por HTTP (NTP/UDP puede estar bloqueado) ---
-        echo "[HeliOs] Sincronizando reloj del sistema via HTTP..."
+    if [ $CONECTADO -eq 1 ]; then
+        echo "[HeliOs Network] Conexión Wi-Fi establecida exitosamente en wlan0."
+        chmod 777 /data 2>/dev/null || true
+        chmod 666 "$CONFIG_FILE" 2>/dev/null || true
+
+        # Sincronización horaria (no bloqueante para el estado del servicio)
+        echo "[HeliOs Network] Sincronizando reloj del sistema via HTTP..."
         python3 -c "
 import urllib.request, subprocess, email.utils
 try:
-    h = urllib.request.urlopen('http://www.google.com', timeout=5).headers['Date']
+    h = urllib.request.urlopen('http://www.google.com', timeout=4).headers['Date']
     dt = email.utils.parsedate_to_datetime(h)
     subprocess.run(['date', '-u', '-s', dt.strftime('%Y-%m-%d %H:%M:%S')], check=True)
-    print('[HeliOs] Reloj sincronizado:', dt.strftime('%Y-%m-%d %H:%M:%S UTC'))
+    print('[HeliOs Network] Reloj sincronizado:', dt.strftime('%Y-%m-%d %H:%M:%S UTC'))
 except Exception as e:
-    print('[HeliOs] No se pudo sincronizar reloj:', e)
-" 2>/dev/null
+    print('[HeliOs Network] No se pudo sincronizar reloj HTTP:', e)
+" 2>/dev/null || true
 
-        # --- Reiniciar daemons de telemetría DESPUÉS de tener red y hora ---
-        echo "[HeliOs] Reiniciando daemons de telemetría..."
-        systemctl restart mosquitto helios-spa helios-scada helios-logger
+        # Notificar a los daemons activos por MQTT para recargar reloj y efemérides en caliente
+        echo "[HeliOs Network] Notificando recarga de efemérides solares vía MQTT..."
+        mosquitto_pub -h 127.0.0.1 -t "helios/config/reload" -m '{"action":"net_ready"}' 2>/dev/null || true
 
         exit 0
     else
-        rm -f "$CONFIG_FILE"
-        killall wpa_supplicant udhcpc 2>/dev/null
+        echo "[HeliOs Network] Timeout de 25s agotado sin IP válida. Fallo de autenticación o red no disponible."
         iniciar_portal
+        exit 0
     fi
 else
+    echo "[HeliOs Network] Archivo $CONFIG_FILE no encontrado. Iniciando modo aprovisionamiento..."
     iniciar_portal
+    exit 0
 fi

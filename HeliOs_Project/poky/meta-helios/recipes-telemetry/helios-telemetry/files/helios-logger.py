@@ -147,9 +147,9 @@ def on_message(client, userdata, msg):
                 1: "Sobrevoltaje de Red",
                 13: "Fuga a Tierra Detectada",
                 14: "Sobrecalentamiento del Inversor",
-                101: "Pérdida de Panel en Serie",
-                102: "Sombreo o Suciedad en Arreglo",
-                103: "Alerta Térmica: Sobrecalentamiento (>65°C)",
+                101: "Pérdida de Panel en Serie Detectada (Caída de Voltaje DC)",
+                102: "Sombreo o Suciedad en Arreglo Fotovoltaico (Baja Potencia)",
+                103: "Sobrecalentamiento en Inversor (> 65°C)",
             }
             desc = sunspec_names.get(fault, f"Falla Inversor SunSpec código {fault}")
             insert_alert(now, fault, desc)

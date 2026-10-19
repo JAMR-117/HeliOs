@@ -8,6 +8,7 @@ import subprocess
 import email.utils
 import traceback
 import os
+import threading
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 
@@ -51,70 +52,240 @@ import pvlib
 import paho.mqtt.client as mqtt
 
 # ---------------------------------------------------------
-# 2. ZONA HORARIA Y UBICACIÓN BLINDADAS (SIN DEPENDER DE tzdata)
+# 2. ZONA HORARIA Y UBICACIÓN BLINDADAS
 # ---------------------------------------------------------
-# Offset matemático infalible de -6 horas (México Central / UTC-6)
 TZ_OFFSET = timezone(timedelta(hours=-6))
 
-# Caché de ubicación geográfica para no bloquear el bucle si no hay red
 LOCATION_CACHE = {
-    "lat": 19.68,
-    "lon": -99.01,
+    "lat": 19.6800,
+    "lon": -99.0100,
+    "city": "Ojo de Agua, EdoMex",
     "synced": False
 }
 
-def get_location_coordinates(conf):
+LOCATION_CACHE_FILE = '/data/location_cache.json'
+
+def save_location_cache(lat, lon, city):
     """
-    Obtiene coordenadas geográficas de forma resiliente:
-    1. Si wifi_config.json tiene latitud/longitud válidas.
-    2. Si no, intenta consultar ip-api.com con timeout=3s una sola vez y lo guarda en caché.
-    3. Si falla o no hay conexión, fallback a Ojo de Agua, EdoMex (19.68, -99.01).
+    Persiste lat, lon y city en un archivo dedicado /data/location_cache.json
+    mediante escritura atómica (tmp + os.replace).
+    helios-spa.py NUNCA escribe ni modifica /data/wifi_config.json.
     """
     try:
-        lat = float(conf.get("latitud") or conf.get("lat") or 0.0)
-        lon = float(conf.get("longitud") or conf.get("lon") or 0.0)
-        if lat != 0.0 and lon != 0.0:
-            LOCATION_CACHE["lat"] = lat
-            LOCATION_CACHE["lon"] = lon
-            LOCATION_CACHE["synced"] = True
-            return lat, lon
+        os.makedirs('/data', exist_ok=True)
+        tmp_file = f"{LOCATION_CACHE_FILE}.tmp"
+        data = {
+            "lat": lat,
+            "lon": lon,
+            "latitud": lat,
+            "longitud": lon,
+            "city": city,
+            "ubicacion": city
+        }
+        with open(tmp_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        try:
+            os.chmod(tmp_file, 0o666)
+        except Exception:
+            pass
+        os.replace(tmp_file, LOCATION_CACHE_FILE)
+        print(f"[HeliOs SPA] Coordenadas persistidas en caché: {lat}, {lon} ({city})")
+    except Exception as e:
+        print(f"[HeliOs SPA] Error al persistir location_cache: {e}")
+
+def get_location_coordinates(conf, fetch_network_timeout=None):
+    """
+    Obtiene coordenadas geográficas de forma resiliente y 100% en modo lectura:
+    1. Si conf (/data/wifi_config.json) tiene latitud/longitud válidas.
+    2. Si no, busca en /data/location_cache.json.
+    3. Si fetch_network_timeout > 0, consulta ip-api.com y guarda en /data/location_cache.json.
+    4. Fallback a Ojo de Agua, EdoMex (19.6800, -99.0100).
+    """
+    try:
+        lat_c = conf.get("lat") or conf.get("latitud")
+        lon_c = conf.get("lon") or conf.get("longitud")
+        city_c = conf.get("ubicacion") or conf.get("city")
+        if lat_c is not None and lon_c is not None:
+            lat = float(lat_c)
+            lon = float(lon_c)
+            if lat != 0.0 and lon != 0.0:
+                LOCATION_CACHE["lat"] = lat
+                LOCATION_CACHE["lon"] = lon
+                if city_c:
+                    LOCATION_CACHE["city"] = str(city_c)
+                LOCATION_CACHE["synced"] = True
+                if fetch_network_timeout is None:
+                    return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"], LOCATION_CACHE["city"]
     except Exception:
         pass
 
-    if LOCATION_CACHE["synced"]:
-        return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"]
+    # Si no están en conf, buscar en location_cache.json
+    if not LOCATION_CACHE["synced"] and os.path.exists(LOCATION_CACHE_FILE):
+        try:
+            with open(LOCATION_CACHE_FILE, 'r') as f:
+                l_data = json.load(f)
+                lat_l = float(l_data.get("lat", 0.0))
+                lon_l = float(l_data.get("lon", 0.0))
+                city_l = l_data.get("city") or l_data.get("ubicacion")
+                if lat_l != 0.0 and lon_l != 0.0:
+                    LOCATION_CACHE["lat"] = lat_l
+                    LOCATION_CACHE["lon"] = lon_l
+                    if city_l:
+                        LOCATION_CACHE["city"] = str(city_l)
+                    LOCATION_CACHE["synced"] = True
+                    if fetch_network_timeout is None:
+                        return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"], LOCATION_CACHE["city"]
+        except Exception:
+            pass
 
-    try:
-        req = urllib.request.Request(
-            "http://ip-api.com/json/",
-            headers={"User-Agent": "HeliOs-SPA/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            if data.get("status") == "success":
-                lat = float(data.get("lat", 19.68))
-                lon = float(data.get("lon", -99.01))
-                LOCATION_CACHE["lat"] = lat
-                LOCATION_CACHE["lon"] = lon
-                LOCATION_CACHE["synced"] = True
-                print(f"[HeliOs SPA] Coordenadas obtenidas via IP: lat={lat}, lon={lon}")
-                return lat, lon
-    except Exception as e:
-        print(f"[HeliOs SPA] Fallback a coordenadas por defecto (19.68, -99.01): {e}")
+    if fetch_network_timeout is not None and fetch_network_timeout > 0:
+        try:
+            req = urllib.request.Request(
+                "http://ip-api.com/json/",
+                headers={"User-Agent": "HeliOs-SPA/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=fetch_network_timeout) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                if data.get("status") == "success":
+                    lat = float(data.get("lat", 19.6800))
+                    lon = float(data.get("lon", -99.0100))
+                    city = data.get("city") or data.get("regionName") or "Ojo de Agua, EdoMex"
+                    LOCATION_CACHE["lat"] = lat
+                    LOCATION_CACHE["lon"] = lon
+                    LOCATION_CACHE["city"] = city
+                    LOCATION_CACHE["synced"] = True
+                    save_location_cache(lat, lon, city)
+                    print(f"[HeliOs SPA] Coordenadas obtenidas via IP: lat={lat}, lon={lon}, ubicacion={city}")
+                    return lat, lon, city
+        except Exception as e:
+            print(f"[HeliOs SPA] ip-api no disponible ({e}). Usando coordenadas de caché o fallback.")
 
-    return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"]
+    return LOCATION_CACHE["lat"], LOCATION_CACHE["lon"], LOCATION_CACHE["city"]
 
 # ---------------------------------------------------------
-# 3. SINCRONIZACIÓN DE RELOJ POR HTTP
+# 3. METEOROLOGÍA REAL (OPEN-METEO WMO)
 # ---------------------------------------------------------
-def sync_system_clock_if_needed():
+WEATHER_CACHE_FILE = '/data/weather_cache.json'
+WEATHER_CACHE = {
+    "current": {"weather_code": 0, "cloud_cover": 0},
+    "hourly": {},
+    "timestamp": 0.0
+}
+
+def clasificar_clima(ghi, weather_code, cloud_cover):
     """
-    Intenta sincronizar el reloj del sistema via header HTTP Date de Google o ip-api.
+    Clasifica el clima en 7 estados para la interfaz:
+    - sunny (Día despejado, WMO 0, 1)
+    - partly_cloudy (Día parcialmente nublado, WMO 2)
+    - cloudy (Nublado / Niebla, WMO 3, 45, 48)
+    - rain (Llovizna / Lluvia, WMO 51–67, 80–82)
+    - storm (Tormenta eléctrica / Granizo, WMO 95–99)
+    - clear_night (Noche despejada)
+    - cloudy_night (Noche nublada)
+    """
+    is_day = ghi > 10.0
+    wmo = int(weather_code) if weather_code is not None else 0
+    cc = int(cloud_cover) if cloud_cover is not None else 0
+
+    if wmo in (95, 96, 99):
+        return "storm"
+    if (51 <= wmo <= 67) or (80 <= wmo <= 82) or (71 <= wmo <= 77) or (85 <= wmo <= 86):
+        return "rain"
+
+    if is_day:
+        if wmo in (3, 45, 48) or cc >= 70:
+            return "cloudy"
+        elif wmo == 2 or (25 <= cc < 70):
+            return "partly_cloudy"
+        else:
+            return "sunny"
+    else:
+        if wmo in (2, 3, 45, 48) or cc >= 30:
+            return "cloudy_night"
+        else:
+            return "clear_night"
+
+def fetch_open_meteo_weather(lat, lon, timeout=2):
+    """
+    Consulta Open-Meteo con timeout=2s y caché en memoria y disco.
+    Fallback limpio sin excepciones en caso de desconexión.
+    """
+    global WEATHER_CACHE
+    now_mono = time.monotonic()
+
+    # Si la caché tiene menos de 15 minutos (900s), retornarla
+    if WEATHER_CACHE["timestamp"] > 0 and (now_mono - WEATHER_CACHE["timestamp"] < 900):
+        return WEATHER_CACHE["current"], WEATHER_CACHE["hourly"]
+
+    # Intentar cargar de disco si memoria está vacía
+    if WEATHER_CACHE["timestamp"] == 0 and os.path.exists(WEATHER_CACHE_FILE):
+        try:
+            with open(WEATHER_CACHE_FILE, 'r') as f:
+                disk_cache = json.load(f)
+                WEATHER_CACHE["current"] = disk_cache.get("current", {"weather_code": 0, "cloud_cover": 0})
+                WEATHER_CACHE["hourly"] = disk_cache.get("hourly", {})
+                WEATHER_CACHE["timestamp"] = now_mono
+        except Exception:
+            pass
+
+    # Consultar API Open-Meteo
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}&current=weather_code,cloud_cover"
+        f"&hourly=weather_code,cloud_cover&timezone=America%2FMexico_City&forecast_days=3"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "HeliOs-Meteo/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            current_data = data.get("current", {})
+            hourly_data = data.get("hourly", {})
+
+            cur = {
+                "weather_code": current_data.get("weather_code", 0),
+                "cloud_cover": current_data.get("cloud_cover", 0)
+            }
+
+            # Map hourly: {"2026-10-18T12:00": {"weather_code": ..., "cloud_cover": ...}}
+            h_map = {}
+            times = hourly_data.get("time", [])
+            w_codes = hourly_data.get("weather_code", [])
+            c_covers = hourly_data.get("cloud_cover", [])
+            for t_str, wc, cc in zip(times, w_codes, c_covers):
+                h_map[t_str] = {"weather_code": wc, "cloud_cover": cc}
+
+            WEATHER_CACHE["current"] = cur
+            WEATHER_CACHE["hourly"] = h_map
+            WEATHER_CACHE["timestamp"] = now_mono
+
+            # Persistir caché en disco atómicamente
+            try:
+                tmp_w_file = f"{WEATHER_CACHE_FILE}.tmp"
+                with open(tmp_w_file, 'w') as f:
+                    json.dump({"current": cur, "hourly": h_map}, f)
+                os.chmod(tmp_w_file, 0o666)
+                os.replace(tmp_w_file, WEATHER_CACHE_FILE)
+            except Exception:
+                pass
+
+            print(f"[HeliOs SPA] Clima Open-Meteo sincronizado: WMO={cur['weather_code']}, Nubes={cur['cloud_cover']}%")
+            return cur, h_map
+    except Exception as e:
+        print(f"[HeliOs SPA] Open-Meteo no disponible ({e}). Usando fallback de clima.")
+
+    return WEATHER_CACHE["current"], WEATHER_CACHE["hourly"]
+
+# ---------------------------------------------------------
+# 4. SINCRONIZACIÓN DE RELOJ POR HTTP
+# ---------------------------------------------------------
+def sync_system_clock_if_needed(timeout=2):
+    """
+    Intenta sincronizar el reloj del sistema via header HTTP Date de Google o ip-api con timeout=2s.
     Retorna True si el reloj fue actualizado. No lanza excepciones.
     """
     urls_to_try = [
-        ('http://www.google.com', 3),
-        ('http://ip-api.com/json/', 3)
+        ('http://www.google.com', timeout),
+        ('http://ip-api.com/json/', timeout)
     ]
     for url, t_out in urls_to_try:
         try:
@@ -137,7 +308,7 @@ def sync_system_clock_if_needed():
     return False
 
 # ---------------------------------------------------------
-# 4. LECTURA DE CONFIGURACIÓN DE PANELES
+# 5. LECTURA DE CONFIGURACIÓN DE PANELES
 # ---------------------------------------------------------
 def read_panel_config():
     """
@@ -150,8 +321,12 @@ def read_panel_config():
         "wp": 550.0,
         "serie": 18,
         "paralelo": 4,
-        "latitud": 19.68,
-        "longitud": -99.01
+        "latitud": 19.6800,
+        "longitud": -99.0100,
+        "lat": 19.6800,
+        "lon": -99.0100,
+        "city": "Ojo de Agua, EdoMex",
+        "ubicacion": "Ojo de Agua, EdoMex"
     }
     try:
         if os.path.exists('/data/wifi_config.json'):
@@ -167,12 +342,13 @@ def read_panel_config():
     return defaults
 
 # ---------------------------------------------------------
-# 5. GENERACIÓN DEL PRONÓSTICO (10 DÍAS)
+# 6. GENERACIÓN DEL PRONÓSTICO (36 HORAS PARA ARRANQUE INSTANTÁNEO)
 # ---------------------------------------------------------
-def generar_pronostico_10_dias(loc, config):
+def generar_pronostico(loc, config, lat, lon, horas=36):
     """
-    Calcula la curva de irradiancia futura y la guarda como JSON para Flutter.
-    Usa offset de -6 horas puro sin depender de tzdata de Linux.
+    Calcula la curva de irradiancia futura y la guarda como JSON atómico para Flutter.
+    Calcula 36 horas en lugar de 240, reduciendo el cómputo de Pandas/pvlib en ~85%.
+    Usa offset de -6 horas puro sin depender de tzdata de Linux y modelo 'haurwitz'.
     """
     try:
         os.makedirs('/data', exist_ok=True)
@@ -180,7 +356,7 @@ def generar_pronostico_10_dias(loc, config):
         ahora_pd = pd.Timestamp(ahora_mx).floor('h')
 
         tiempos_futuros = pd.date_range(
-            start=ahora_pd, periods=240, freq='1h'
+            start=ahora_pd, periods=horas, freq='1h'
         )
         cs_futuro = loc.get_clearsky(tiempos_futuros, model='haurwitz')
 
@@ -189,17 +365,30 @@ def generar_pronostico_10_dias(loc, config):
         serie = int(config.get('serie') or 18)
         paralelo = int(config.get('paralelo') or 4)
 
+        _, hourly_weather = fetch_open_meteo_weather(lat, lon, timeout=2)
+
         pronostico = []
         for t, ghi in zip(tiempos_futuros, cs_futuro['ghi']):
             ghi_f = float(ghi)
+            t_dt = t.to_pydatetime()
+            t_str_iso_hour = t_dt.strftime("%Y-%m-%dT%H:00")
+
+            w_info = hourly_weather.get(t_str_iso_hour, {})
+            w_code = w_info.get("weather_code", 0)
+            c_cover = w_info.get("cloud_cover", 0)
+            weather_state = clasificar_clima(ghi_f, w_code, c_cover)
+
+            # Atenuación por nubosidad para generación esperada
+            factor_nube = max(0.2, 1.0 - 0.75 * ((c_cover / 100.0) ** 2)) if ghi_f > 0 else 0.0
+            ghi_efectivo = ghi_f * factor_nube if c_cover > 10 else ghi_f
+
             if ghi_f > 0:
                 v = voc * serie
-                i = isc * paralelo * (ghi_f / 1000.0)
+                i = isc * paralelo * (ghi_efectivo / 1000.0)
                 p = v * i
             else:
                 p = 0.0
 
-            t_dt = t.to_pydatetime()
             pronostico.append({
                 "timestamp_epoch": int(t_dt.timestamp()),
                 "hora": t_dt.isoformat(),
@@ -207,149 +396,281 @@ def generar_pronostico_10_dias(loc, config):
                 "fecha_str": t_dt.strftime("%d/%m"),
                 "p_exp": round(p, 2),
                 "ghi": round(ghi_f, 2),
+                "weather_state": weather_state,
+                "cloud_cover": c_cover,
             })
 
-        with open('/data/forecast.json', 'w') as f:
+        tmp_forecast = '/data/forecast.json.tmp'
+        with open(tmp_forecast, 'w') as f:
             json.dump(pronostico, f)
         try:
-            os.chmod('/data/forecast.json', 0o666)
+            os.chmod(tmp_forecast, 0o666)
         except Exception:
             pass
-        print(f"[HeliOs SPA] Pronóstico de 10 días generado en /data/forecast.json ({len(pronostico)} horas)")
+        os.replace(tmp_forecast, '/data/forecast.json')
+        print(f"[HeliOs SPA] Pronóstico generado en /data/forecast.json ({len(pronostico)} horas)")
     except Exception as e:
         print(f"[HeliOs SPA] Error generando pronostico: {e}")
         traceback.print_exc()
 
+# Alias por compatibilidad
+generar_pronostico_10_dias = generar_pronostico
+
 # ---------------------------------------------------------
-# 6. BUCLE PRINCIPAL BLINDADO
+# 7. ESTADO DE OVERRIDE TEMPORAL DE CLIMA Y EVENTO DE RECARGA
+# ---------------------------------------------------------
+reload_event = threading.Event()
+OVERRIDE_WEATHER = {
+    "active": False,
+    "weather_state": None,
+    "cloud_cover": 0,
+    "until": 0.0
+}
+
+def trigger_network_refresh(client):
+    try:
+        conf = read_panel_config()
+        sync_system_clock_if_needed(timeout=2)
+        n_lat, n_lon, n_city = get_location_coordinates(conf, fetch_network_timeout=2)
+        n_loc = pvlib.location.Location(n_lat, n_lon, tz=-6)
+        fetch_open_meteo_weather(n_lat, n_lon, timeout=2)
+        generar_pronostico(n_loc, conf, n_lat, n_lon, horas=36)
+        calcular_y_publicar_telemetria(client, n_loc, conf, n_lat, n_lon, n_city)
+        print("[HeliOs SPA] Actualización por red ('net_ready') completada con éxito.")
+    except Exception as err:
+        print(f"[HeliOs SPA] Error en trigger_network_refresh: {err}")
+
+def on_mqtt_message(client, userdata, msg):
+    global OVERRIDE_WEATHER
+    try:
+        topic = msg.topic
+        payload = msg.payload.decode('utf-8')
+        if topic == "helios/config/reload":
+            print("[HeliOs SPA] Mensaje recibido en helios/config/reload -> Recargando al instante.")
+            try:
+                data = json.loads(payload)
+                if data.get("action") == "net_ready":
+                    threading.Thread(target=trigger_network_refresh, args=(client,), daemon=True).start()
+            except Exception:
+                pass
+            reload_event.set()
+        elif topic == "helios/weather/override":
+            data = json.loads(payload)
+            st_weather = data.get("weather_state")
+            dur = float(data.get("duration_sec", 20))
+            cc = int(data.get("cloud_cover", 0))
+            OVERRIDE_WEATHER["active"] = True
+            OVERRIDE_WEATHER["weather_state"] = st_weather
+            OVERRIDE_WEATHER["cloud_cover"] = cc
+            OVERRIDE_WEATHER["until"] = time.time() + dur
+            print(f"[HeliOs SPA] Override temporal de clima recibido: {st_weather} por {dur}s (nubes: {cc}%)")
+            reload_event.set()
+    except Exception as e:
+        print(f"[HeliOs SPA] Error procesando mensaje MQTT ({msg.topic}): {e}")
+
+# ---------------------------------------------------------
+# 8. CÁLCULO Y PUBLICACIÓN DE TELEMETRÍA ESPERADA
+# ---------------------------------------------------------
+def calcular_y_publicar_telemetria(client, loc, conf, lat, lon, city):
+    ahora_mx = datetime.now(TZ_OFFSET)
+    now = pd.Timestamp(ahora_mx)
+
+    cs = loc.get_clearsky(pd.DatetimeIndex([now]), model='haurwitz')
+    solpos = loc.get_solarposition(pd.DatetimeIndex([now]))
+
+    ghi = float(cs['ghi'].iloc[0])
+    azimuth = float(solpos['azimuth'].iloc[0])
+    elevation = float(solpos['elevation'].iloc[0])
+
+    voc = float(conf.get('voc') or 49.6)
+    isc = float(conf.get('isc') or 14.0)
+    serie = int(conf.get('serie') or 18)
+    paralelo = int(conf.get('paralelo') or 4)
+
+    cur_weather = WEATHER_CACHE["current"]
+    w_code = cur_weather.get("weather_code", 0)
+    c_cover = cur_weather.get("cloud_cover", 0)
+    weather_state = clasificar_clima(ghi, w_code, c_cover)
+
+    # Verificar si hay override activo de clima desde el simulador
+    now_time = time.time()
+    if OVERRIDE_WEATHER["active"] and now_time < OVERRIDE_WEATHER["until"]:
+        if OVERRIDE_WEATHER["weather_state"]:
+            weather_state = OVERRIDE_WEATHER["weather_state"]
+        c_cover = OVERRIDE_WEATHER["cloud_cover"]
+        if weather_state in ("clear_night", "cloudy_night"):
+            elevation = min(elevation, -5.0)
+            ghi = 0.0
+        elif weather_state in ("sunny", "partly_cloudy", "cloudy", "rain", "storm"):
+            if elevation <= 0:
+                elevation = 45.0
+            if ghi <= 10.0:
+                ghi = 650.0
+    elif OVERRIDE_WEATHER["active"] and now_time >= OVERRIDE_WEATHER["until"]:
+        OVERRIDE_WEATHER["active"] = False
+
+    factor_nube = max(0.2, 1.0 - 0.75 * ((c_cover / 100.0) ** 2)) if ghi > 0 else 0.0
+    ghi_efectivo = ghi * factor_nube if c_cover > 10 else ghi
+
+    if ghi > 0.0:
+        v_exp = voc * serie
+        i_exp = isc * paralelo * (ghi_efectivo / 1000.0)
+        p_exp = v_exp * i_exp
+    else:
+        v_exp = 0.0
+        i_exp = 0.0
+        p_exp = 0.0
+
+    # Modo Estiba Nocturna (Flat-Stow)
+    is_night = elevation <= 0 or ghi <= 10.0
+    if is_night:
+        motor_azimuth = 180.0
+        motor_elevation = 90.0
+    else:
+        motor_azimuth = round(azimuth, 2)
+        motor_elevation = round(elevation, 2)
+
+    payload_expected = {
+        "azimuth": round(azimuth, 2),
+        "elevation": round(elevation, 2),
+        "v_exp": round(v_exp, 2),
+        "i_exp": round(i_exp, 2),
+        "p_exp": round(p_exp, 2),
+        "ghi": round(ghi, 2),
+        "is_night": is_night,
+        "motor_azimuth": motor_azimuth,
+        "motor_elevation": motor_elevation,
+        "system_time": ahora_mx.strftime("%H:%M"),
+        "system_time_full": ahora_mx.strftime("%H:%M:%S"),
+        "lat": round(lat, 4),
+        "lon": round(lon, 4),
+        "ubicacion": city,
+        "weather_state": weather_state,
+        "cloud_cover": c_cover,
+    }
+    client.publish("helios/spa/expected", json.dumps(payload_expected), retain=True)
+
+    payload_coords = {
+        "azimuth": round(azimuth, 2),
+        "elevation": round(elevation, 2),
+        "is_night": is_night,
+        "motor_azimuth": motor_azimuth,
+        "motor_elevation": motor_elevation,
+    }
+    client.publish("helios/spa/coordinates", json.dumps(payload_coords), retain=True)
+
+# ---------------------------------------------------------
+# 9. BUCLE PRINCIPAL CON FAST-PATH EN SEGUNDO 0
 # ---------------------------------------------------------
 def main():
     os.makedirs('/data', exist_ok=True)
+    start_mono = time.monotonic()
 
-    # Intento inicial de sincronización de reloj
-    sync_system_clock_if_needed()
-
-    conf = read_panel_config()
-    LAT, LON = get_location_coordinates(conf)
-
-    # Location con offset numérico explícito tz=-6
-    loc = pvlib.location.Location(LAT, LON, tz=-6)
-
-    # Generación inicial del pronóstico
-    generar_pronostico_10_dias(loc, conf)
-
-    # Configuración de cliente MQTT con reconexión robusta
+    # Configuración de cliente MQTT con inicio inmediato
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    mqtt_conectado = False
-    for attempt in range(10):
-        try:
-            client.connect("127.0.0.1", 1883, 60)
-            client.loop_start()
-            mqtt_conectado = True
-            print("[HeliOs SPA] Conectado a Mosquitto exitosamente.")
-            break
-        except Exception as e:
-            print(f"[HeliOs SPA] Intento {attempt+1}/10 - Esperando a Mosquitto (127.0.0.1:1883): {e}")
-            time.sleep(2)
+    client.on_message = on_mqtt_message
 
-    if not mqtt_conectado:
-        # Si Mosquitto aún no inicia, client.connect_async o loop diferido
+    def on_connect_cb(c, userdata, flags, rc, properties=None):
+        c.subscribe("helios/config/reload", 1)
+        c.subscribe("helios/weather/override", 1)
+        print("[HeliOs SPA] Suscrito a helios/config/reload y helios/weather/override")
+
+    client.on_connect = on_connect_cb
+
+    try:
+        client.connect("127.0.0.1", 1883, 60)
+        client.loop_start()
+        print("[HeliOs SPA] Conectado a Mosquitto exitosamente.")
+    except Exception as e:
         try:
             client.connect_async("127.0.0.1", 1883, 60)
             client.loop_start()
-        except Exception as e:
-            print(f"[HeliOs SPA] Conexión asíncrona MQTT: {e}")
+            print(f"[HeliOs SPA] Conexión MQTT en segundo plano: {e}")
+        except Exception as ex:
+            print(f"[HeliOs SPA] Error inicializando MQTT: {ex}")
+
+    # FAST-PATH SEGUNDO 0:
+    # 1. Lectura inmediata de configuración de paneles y coordenadas locales (<3ms)
+    conf = read_panel_config()
+    lat, lon, city = get_location_coordinates(conf, fetch_network_timeout=None)
+    loc = pvlib.location.Location(lat, lon, tz=-6)
+
+    # 2. Publicación inmediata de telemetría y coordenadas en segundo 0
+    try:
+        calcular_y_publicar_telemetria(client, loc, conf, lat, lon, city)
+        print(f"[HeliOs SPA] FAST-PATH SEGUNDO 0: Telemetría publicada (lat={lat}, lon={lon}, ubicacion={city})")
+    except Exception as e:
+        print(f"[HeliOs SPA] Error en publicación inicial de segundo 0: {e}")
+
+    # 3. Generación inmediata en segundo 0 del pronóstico de 36 horas en disco
+    try:
+        generar_pronostico(loc, conf, lat, lon, horas=36)
+        print("[HeliOs SPA] FAST-PATH SEGUNDO 0: /data/forecast.json (36 horas) generado.")
+    except Exception as e:
+        print(f"[HeliOs SPA] Error generando pronóstico inicial: {e}")
+
+    # 4. Tareas asíncronas de enriquecimiento (reloj, ip-api, Open-Meteo)
+    threading.Thread(target=trigger_network_refresh, args=(client,), daemon=True).start()
 
     last_forecast_time = time.monotonic()
     prev_epoch = time.time()
+    last_config_mtime = 0.0
+    if os.path.exists('/data/wifi_config.json'):
+        try:
+            last_config_mtime = os.path.getmtime('/data/wifi_config.json')
+        except Exception:
+            pass
 
     # Bucle infinito protegido contra cualquier excepción
     while True:
         try:
+            # Detección inmediata de cambios en /data/wifi_config.json
+            current_mtime = 0.0
+            if os.path.exists('/data/wifi_config.json'):
+                try:
+                    current_mtime = os.path.getmtime('/data/wifi_config.json')
+                except Exception:
+                    pass
+            if current_mtime > 0 and current_mtime != last_config_mtime:
+                last_config_mtime = current_mtime
+                print("[HeliOs SPA] Detectado cambio en /data/wifi_config.json -> Recalculando inmediatamente.")
+                reload_event.set()
+
             conf = read_panel_config()
-            LAT, LON = get_location_coordinates(conf)
-            loc = pvlib.location.Location(LAT, LON, tz=-6)
-
-            ahora_mx = datetime.now(TZ_OFFSET)
-            now = pd.Timestamp(ahora_mx)
-
-            cs = loc.get_clearsky(pd.DatetimeIndex([now]), model='haurwitz')
-            solpos = loc.get_solarposition(pd.DatetimeIndex([now]))
-
-            ghi = float(cs['ghi'].iloc[0])
-            azimuth = float(solpos['azimuth'].iloc[0])
-            elevation = float(solpos['elevation'].iloc[0])
-
-            voc = float(conf.get('voc') or 49.6)
-            isc = float(conf.get('isc') or 14.0)
-            serie = int(conf.get('serie') or 18)
-            paralelo = int(conf.get('paralelo') or 4)
-
-            # Cálculo de valores esperados
-            if ghi > 0.0:
-                v_exp = voc * serie
-                i_exp = isc * paralelo * (ghi / 1000.0)
-                p_exp = v_exp * i_exp
-            else:
-                v_exp = 0.0
-                i_exp = 0.0
-                p_exp = 0.0
-
-            # Modo Estiba Nocturna (Flat-Stow)
-            is_night = elevation <= 0 or ghi <= 10.0
-            if is_night:
-                motor_azimuth = 180.0
-                motor_elevation = 90.0
-            else:
-                motor_azimuth = round(azimuth, 2)
-                motor_elevation = round(elevation, 2)
-
-            payload_expected = {
-                "azimuth": round(azimuth, 2),
-                "elevation": round(elevation, 2),
-                "v_exp": round(v_exp, 2),
-                "i_exp": round(i_exp, 2),
-                "p_exp": round(p_exp, 2),
-                "ghi": round(ghi, 2),
-                "is_night": is_night,
-                "motor_azimuth": motor_azimuth,
-                "motor_elevation": motor_elevation,
-                "system_time": ahora_mx.strftime("%H:%M"),
-                "system_time_full": ahora_mx.strftime("%H:%M:%S"),
-            }
-            client.publish("helios/spa/expected", json.dumps(payload_expected), retain=True)
-
-            payload_coords = {
-                "azimuth": round(azimuth, 2),
-                "elevation": round(elevation, 2),
-                "is_night": is_night,
-                "motor_azimuth": motor_azimuth,
-                "motor_elevation": motor_elevation,
-            }
-            client.publish("helios/spa/coordinates", json.dumps(payload_coords), retain=True)
-
+            lat, lon, city = get_location_coordinates(conf, fetch_network_timeout=None)
+            loc = pvlib.location.Location(lat, lon, tz=-6)
+            calcular_y_publicar_telemetria(client, loc, conf, lat, lon, city)
         except Exception as e:
-            print(f"[HeliOs SPA] Error en el ciclo principal: {e}")
+            print(f"[HeliOs SPA] Error en ciclo principal: {e}")
             traceback.print_exc()
 
-        # Regenerar pronóstico cada 15 min o ante saltos bruscos de reloj
+        # Regenerar pronóstico periódicamente o ante señal de recarga
         try:
             now_epoch = time.time()
-            elapsed = time.monotonic() - last_forecast_time
+            elapsed_forecast = time.monotonic() - last_forecast_time
             clock_jump = abs(now_epoch - prev_epoch - 10) > 120
 
-            if elapsed >= 900 or clock_jump:
-                reloj_actualizado = sync_system_clock_if_needed()
-                generar_pronostico_10_dias(loc, conf)
+            if elapsed_forecast >= 900 or clock_jump or reload_event.is_set():
+                generar_pronostico(loc, conf, lat, lon, horas=36)
                 last_forecast_time = time.monotonic()
-                if reloj_actualizado:
-                    print("[HeliOs SPA] Pronóstico actualizado tras sincronización horaria.")
             prev_epoch = now_epoch
         except Exception as e:
             print(f"[HeliOs SPA] Error en verificación de pronóstico: {e}")
-            traceback.print_exc()
 
-        time.sleep(10)
+        # Si reload_event fue activado, consumirlo y continuar sin esperar
+        if reload_event.is_set():
+            reload_event.clear()
+            continue
+
+        # Durante los primeros 60 segundos publica cada 3s; luego cada 10s
+        elapsed_total = time.monotonic() - start_mono
+        intervalo = 3 if elapsed_total < 60 else 10
+
+        # Esperar intervalo o despertar de inmediato si llega mensaje MQTT
+        reload_event.wait(timeout=intervalo)
+        if reload_event.is_set():
+            reload_event.clear()
 
 if __name__ == "__main__":
     main()
+

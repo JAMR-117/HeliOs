@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../services/mqtt_service.dart';
 import '../theme/helios_theme.dart';
+import '../theme/weather_palette.dart';
 
 class ScadaErrorRecord {
   final String timestamp;
@@ -152,18 +153,17 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
         scada['description'] as String? ?? 'Operación Normal';
     final bool hasActiveAlarm = activeCode != 0;
 
+    final String weatherState = mqttService.weatherState;
     final bool isNight = mqttService.isNight;
+    final palette = WeatherPalette.getPalette(weatherState, isNight);
 
-    // Paleta homogénea: Día (Claro) vs Noche (Oscuro)
-    final Color bgColor = isNight ? const Color(0xFF131B2A) : const Color(0xFFF1F5F9);
-    final Gradient? bgGradient = isNight ? HeliosTheme.nightBackgroundGradient : null;
-    final Color cardColor = isNight ? const Color(0xFF1E293B) : Colors.white;
-    final Color cardBorderColor = isNight
-        ? HeliosTheme.oatmeal.withValues(alpha: 0.2)
-        : const Color(0xFFE2E8F0);
-    final Color textPrimary = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
-    final Color textMuted = isNight ? HeliosTheme.oatmeal : const Color(0xFF475569);
-    final Color appBarItemColor = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+    // Paleta cromática adaptativa al clima
+    final BoxDecoration rootDecoration = palette.rootDecoration;
+    final Color cardColor = palette.cardColor;
+    final Color cardBorderColor = palette.cardBorderColor;
+    final Color textPrimary = palette.textPrimary;
+    final Color textMuted = palette.textMuted;
+    final Color appBarItemColor = palette.textPrimary;
 
     // Fusión de errores SQLite con los errores capturados en memoria durante la sesión
     final List<ScadaErrorRecord> combinedLogs = [];
@@ -191,10 +191,7 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
     }
 
     return Container(
-      decoration: BoxDecoration(
-        color: bgColor,
-        gradient: bgGradient,
-      ),
+      decoration: rootDecoration,
       child: Scaffold(
         backgroundColor: Colors.transparent,
         appBar: AppBar(

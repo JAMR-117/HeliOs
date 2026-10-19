@@ -5,6 +5,7 @@ import paho.mqtt.client as mqtt
 import json
 import time
 import random
+import socket
 from datetime import datetime, timezone, timedelta
 
 # --- CONFIGURACIÓN DE PÁGINA ---
@@ -32,10 +33,13 @@ if "yield_kwh" not in st.session_state:
 
 # Diccionario SunSpec para interfaz manual
 SUNSPEC_ERRORS = {
-    0:  "0: Operación Normal",
-    1:  "1: Sobrevoltaje de Red",
-    13: "13: Fuga a Tierra Detectada",
-    14: "14: Sobrecalentamiento del Inversor",
+    0:   "0: Operación Normal",
+    1:   "1: Sobrevoltaje de Red",
+    13:  "13: Fuga a Tierra Detectada",
+    14:  "14: Sobrecalentamiento del Inversor",
+    101: "101: Pérdida de Panel en Serie (Caída Voltaje DC)",
+    102: "102: Sombreo o Suciedad en Arreglo (Baja Potencia)",
+    103: "103: Sobrecalentamiento en Inversor (>65°C)",
 }
 
 # Fallback de configuración de paneles
@@ -57,10 +61,19 @@ def _on_spa_message(client, userdata, msg):
     except Exception:
         pass
 
+def _connect_client(ip: str):
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_message = _on_spa_message
+    client.connect(ip, 1883, 5)
+    # Solo lectura del SPA — el simulador NUNCA publica en helios/spa/#
+    client.subscribe("helios/spa/expected", 0)
+    client.loop_start()
+    return client
+
 def get_or_create_mqtt_client(ip: str):
     """
     Devuelve el cliente MQTT persistente ya conectado,
-    o crea uno nuevo si la IP cambió o aún no existe.
+    o crea uno nuevo con 1 reintento suave tras 0.5s y mensaje amigable en español.
     Solo suscribe a helios/spa/expected — NUNCA publica en helios/spa/#.
     """
     if (st.session_state["mqtt_client"] is not None
@@ -68,7 +81,7 @@ def get_or_create_mqtt_client(ip: str):
             and st.session_state["mqtt_connected"]):
         return st.session_state["mqtt_client"], True, ""
 
-    # Desconectar cliente anterior
+    # Desconectar cliente anterior si existía
     old = st.session_state.get("mqtt_client")
     if old is not None:
         try:
@@ -77,28 +90,35 @@ def get_or_create_mqtt_client(ip: str):
         except Exception:
             pass
 
-    try:
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        client.on_message = _on_spa_message
-        client.connect(ip, 1883, 10)
-        # Solo lectura del SPA — el simulador NUNCA publica en helios/spa/#
-        client.subscribe("helios/spa/expected", 0)
-        client.loop_start()
-        st.session_state["mqtt_client"]   = client
-        st.session_state["mqtt_connected"] = True
-        st.session_state["last_rpi_ip"]   = ip
-        return client, True, ""
-    except OSError as e:
-        st.session_state["mqtt_client"]   = None
-        st.session_state["mqtt_connected"] = False
-        return None, False, f"Fallo de conexión MQTT ({ip}:1883): {e}"
-    except Exception as e:
-        st.session_state["mqtt_client"]   = None
-        st.session_state["mqtt_connected"] = False
-        return None, False, f"Error MQTT inesperado: {e}"
+    friendly_err = (
+        f"No se pudo establecer conexión con la Raspberry Pi ({ip}:1883). "
+        "Verifique que la IP sea correcta y que el equipo esté encendido en la misma red."
+    )
+
+    for intento in range(2):
+        try:
+            client = _connect_client(ip)
+            st.session_state["mqtt_client"] = client
+            st.session_state["mqtt_connected"] = True
+            st.session_state["last_rpi_ip"] = ip
+            return client, True, ""
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            if intento == 0:
+                time.sleep(0.5)
+                continue
+            st.session_state["mqtt_client"] = None
+            st.session_state["mqtt_connected"] = False
+            return None, False, friendly_err
+        except Exception:
+            if intento == 0:
+                time.sleep(0.5)
+                continue
+            st.session_state["mqtt_client"] = None
+            st.session_state["mqtt_connected"] = False
+            return None, False, friendly_err
 
 def publish_inverter_telemetry(ip: str, payload: dict):
-    """Publica EXCLUSIVAMENTE en helios/inverter/telemetry."""
+    """Publica EXCLUSIVAMENTE en helios/inverter/telemetry con reintento automático suave."""
     client, connected, err = get_or_create_mqtt_client(ip)
     if not connected:
         return False, err
@@ -106,9 +126,49 @@ def publish_inverter_telemetry(ip: str, payload: dict):
         msg = client.publish("helios/inverter/telemetry", json.dumps(payload))
         msg.wait_for_publish(timeout=5.0)
         return True, "Datos inyectados al broker."
-    except Exception as e:
+    except Exception:
+        # Reintento suave de reconexión si el socket se interrumpió
+        time.sleep(0.5)
         st.session_state["mqtt_connected"] = False
-        return False, f"Error publicando: {e}"
+        client, connected, err = get_or_create_mqtt_client(ip)
+        if not connected:
+            return False, err
+        try:
+            msg = client.publish("helios/inverter/telemetry", json.dumps(payload))
+            msg.wait_for_publish(timeout=5.0)
+            return True, "Datos inyectados al broker."
+        except Exception:
+            st.session_state["mqtt_connected"] = False
+            return False, (
+                f"No se pudo establecer conexión con la Raspberry Pi ({ip}:1883). "
+                "Verifique que la IP sea correcta y que el equipo esté encendido en la misma red."
+            )
+
+def publish_weather_override(ip: str, payload: dict):
+    """Publica override temporal en helios/weather/override con reintento automático suave."""
+    client, connected, err = get_or_create_mqtt_client(ip)
+    if not connected:
+        return False, err
+    try:
+        msg = client.publish("helios/weather/override", json.dumps(payload), retain=False)
+        msg.wait_for_publish(timeout=5.0)
+        return True, "Override de clima enviado al broker."
+    except Exception:
+        time.sleep(0.5)
+        st.session_state["mqtt_connected"] = False
+        client, connected, err = get_or_create_mqtt_client(ip)
+        if not connected:
+            return False, err
+        try:
+            msg = client.publish("helios/weather/override", json.dumps(payload), retain=False)
+            msg.wait_for_publish(timeout=5.0)
+            return True, "Override de clima enviado al broker."
+        except Exception:
+            st.session_state["mqtt_connected"] = False
+            return False, (
+                f"No se pudo establecer conexión con la Raspberry Pi ({ip}:1883). "
+                "Verifique que la IP sea correcta y que el equipo esté encendido en la misma red."
+            )
 
 # ===========================================================
 # CÁLCULO LOCAL DE IRRADIANCIA (fallback si no hay broker)
@@ -303,3 +363,66 @@ else:
             )
         else:
             st.error(msg_txt)
+
+# ===========================================================
+# 🌦️ SIMULACIÓN TEMPORAL DE CLIMA (PRUEBA DE UI ADAPTATIVA)
+# ===========================================================
+st.divider()
+st.subheader("🌦️ Simulación Temporal de Clima (Prueba de UI Adaptativa)")
+st.markdown(
+    "Inyecta un estado meteorológico temporal para validar "
+    "el diseño cromático adaptativo de la HMI. Tras expirar la duración, "
+    "el sistema regresa automáticamente a los datos reales."
+)
+
+CLIMAS_DICT = {
+    "sunny": "☀️ Soleado (sunny)",
+    "partly_cloudy": "⛅ Parcialmente Nublado (partly_cloudy)",
+    "cloudy": "☁️ Nublado (cloudy)",
+    "rain": "🌧️ Lluvia (rain)",
+    "storm": "⛈️ Tormenta (storm)",
+    "clear_night": "🌙 Noche Despejada (clear_night)",
+    "cloudy_night": "☁️🌙 Noche Nublada (cloudy_night)"
+}
+
+col_clima_1, col_clima_2 = st.columns([1, 1])
+with col_clima_1:
+    clima_sel = st.selectbox(
+        "Clima a simular:",
+        options=list(CLIMAS_DICT.keys()),
+        format_func=lambda x: CLIMAS_DICT[x],
+        index=0
+    )
+
+with col_clima_2:
+    cloud_defaults = {
+        "sunny": 5, "partly_cloudy": 40, "cloudy": 85,
+        "rain": 90, "storm": 100, "clear_night": 0, "cloudy_night": 65
+    }
+    cloud_cover_sim = st.slider(
+        "Nubosidad (%)",
+        min_value=0, max_value=100,
+        value=cloud_defaults.get(clima_sel, 20),
+        step=5
+    )
+
+duracion_sec = st.slider(
+    "Duración de la prueba (segundos)",
+    min_value=10, max_value=120, value=20, step=5
+)
+
+if st.button("🌦️ Enviar Clima Temporal a la HMI", type="primary", use_container_width=True):
+    payload_weather = {
+        "weather_state": clima_sel,
+        "cloud_cover": cloud_cover_sim,
+        "duration_sec": duracion_sec
+    }
+    w_ok, w_msg = publish_weather_override(rpi_ip, payload_weather)
+    if w_ok:
+        st.success(
+            f"✅ Clima temporal '{CLIMAS_DICT[clima_sel]}' enviado a la HMI por {duracion_sec} segundos "
+            f"(Nubosidad: {cloud_cover_sim}%). La HMI adaptará su paleta cromática y volverá automáticamente."
+        )
+    else:
+        st.error(w_msg)
+

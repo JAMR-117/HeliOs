@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:sqlite3/common.dart';
@@ -45,8 +46,26 @@ Future<CommonDatabase?> openAppDatabase(String dbPath) async {
 }
 
 bool isProvisioningFileMissing() {
-  final configFile = File('/data/wifi_config.json');
-  return !configFile.existsSync();
+  try {
+    final configFile = File('/data/wifi_config.json');
+    if (!configFile.existsSync()) {
+      return true;
+    }
+    final content = configFile.readAsStringSync().trim();
+    if (content.isEmpty) {
+      return true;
+    }
+    final Map<String, dynamic> data = json.decode(content);
+    final ssid = data['ssid']?.toString().trim();
+    if (ssid == null || ssid.isEmpty) {
+      return true;
+    }
+    return false;
+  } catch (_) {
+    // Si hubo una excepción temporal de lectura/parseo pero el archivo existe, no forzar modo aprovisionamiento
+    final configFile = File('/data/wifi_config.json');
+    return !configFile.existsSync();
+  }
 }
 
 String? readConfigFile(String path) {
@@ -57,4 +76,124 @@ String? readConfigFile(String path) {
     }
   } catch (_) {}
   return null;
+}
+
+bool writeConfigFile(String path, String content) {
+  try {
+    final file = File(path);
+    if (!file.parent.existsSync()) {
+      file.parent.createSync(recursive: true);
+    }
+    // Escritura atómica vía archivo temporal
+    final tmpPath = '$path.tmp';
+    final tmpFile = File(tmpPath);
+    tmpFile.writeAsStringSync(content);
+    try {
+      Process.runSync('chmod', ['666', tmpPath]);
+    } catch (_) {}
+    tmpFile.renameSync(path);
+    try {
+      Process.runSync('chmod', ['666', path]);
+    } catch (_) {}
+    return true;
+  } catch (_) {
+    try {
+      final file = File(path);
+      file.writeAsStringSync(content);
+      try {
+        Process.runSync('chmod', ['666', path]);
+      } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+Future<List<String>> scanWifiNetworks() async {
+  try {
+    final result = await Process.run(
+      'sh',
+      ['-c', "iw dev wlan0 scan 2>/dev/null | grep 'SSID:' | sed 's/.*SSID: //' | sort -u"],
+    );
+    if (result.exitCode == 0 && result.stdout is String) {
+      final lines = (result.stdout as String)
+          .split('\n')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty && !s.contains('\x00'))
+          .toList();
+      return lines;
+    }
+  } catch (_) {}
+  return [];
+}
+
+Future<bool> reconnectWifiHot() async {
+  try {
+    await Process.start('/usr/bin/helios-network-manager.sh', ['--force-reconnect'], mode: ProcessStartMode.detached);
+    return true;
+  } catch (_) {
+    try {
+      await Process.start('sh', ['-c', '/usr/bin/helios-network-manager.sh --force-reconnect &'], mode: ProcessStartMode.detached);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+Future<bool> checkWifiConnected() async {
+  try {
+    final result = await Process.run(
+      'sh',
+      ['-c', 'ip -4 a show wlan0 | grep "inet " | grep -v "192.168.4.1" | grep -qv "169.254"'],
+    );
+    return result.exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> isCaptivePortalRunning() async {
+  try {
+    final result = await Process.run(
+      'sh',
+      ['-c', 'pgrep -f portal.py || pgrep hostapd'],
+    );
+    return result.exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> launchCaptivePortalService() async {
+  try {
+    await Process.start('/usr/bin/helios-network-manager.sh', [], mode: ProcessStartMode.detached);
+    return true;
+  } catch (_) {
+    try {
+      await Process.start('sh', ['-c', '/usr/bin/helios-network-manager.sh &'], mode: ProcessStartMode.detached);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+Future<void> rebootSystem() async {
+  try {
+    await Process.run('sh', ['-c', 'sync && reboot']);
+  } catch (_) {}
+}
+
+Future<void> resetToProvisioningMode() async {
+  try {
+    final file = File('/data/wifi_config.json');
+    if (file.existsSync()) {
+      file.deleteSync();
+    }
+  } catch (_) {}
+  try {
+    await Process.run('sh', ['-c', 'rm -f /data/wifi_config.json && sync && reboot']);
+  } catch (_) {}
 }
