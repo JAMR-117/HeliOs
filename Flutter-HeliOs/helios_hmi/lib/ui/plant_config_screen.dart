@@ -390,6 +390,20 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                               const JsonEncoder.withIndent('  ').convert(currentConfig),
                             );
 
+                            // Sincronización automática de credenciales Wi-Fi hacia los nodos ESP32
+                            try {
+                              final mqtt = Provider.of<MqttService>(context, listen: false);
+                              mqtt.publishEsp32WifiConfig(newSsid, newPass);
+                            } catch (_) {}
+                            writeConfigFile(
+                              '/data/esp32_wifi_sync.json',
+                              json.encode({
+                                'ssid': newSsid,
+                                'pass': newPass,
+                                'timestamp': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+                              }),
+                            );
+
                             await reconnectWifiHot();
 
                             // Sondeo de enlace IP en caliente durante hasta 20 segundos
@@ -1240,18 +1254,24 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: isNight
-                              ? HeliosTheme.abyssalAnchorfishBlue.withValues(alpha: 0.6)
-                              : const Color(0xFFF1F5F9),
+                          color: palette.accentSolar.withValues(alpha: isNight ? 0.08 : 0.06),
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                            color: cardBorderColor,
+                            color: palette.accentSolar.withValues(alpha: isNight ? 0.35 : 0.25),
+                            width: 1,
                           ),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.location_on, color: _accentBlue, size: 22),
-                            const SizedBox(width: 10),
+                            Container(
+                              padding: const EdgeInsets.all(7),
+                              decoration: BoxDecoration(
+                                color: palette.accentSolar.withValues(alpha: 0.15),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(Icons.location_on, color: palette.accentSolar, size: 20),
+                            ),
+                            const SizedBox(width: 12),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,

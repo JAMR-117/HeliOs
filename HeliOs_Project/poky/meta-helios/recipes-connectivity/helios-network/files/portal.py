@@ -183,6 +183,27 @@ class Portal(BaseHTTPRequestHandler):
                 
                 os.chmod(tmp_path, 0o666)
                 os.replace(tmp_path, final_path)
+
+                # Sincronización automática de credenciales Wi-Fi hacia los nodos ESP32
+                try:
+                    esp_data = json.dumps({
+                        'ssid': config['ssid'],
+                        'pass': config['pass'],
+                        'timestamp': time.time()
+                    })
+                    tmp_esp = '/data/esp32_wifi_sync.json.tmp'
+                    with open(tmp_esp, 'w') as f_esp:
+                        f_esp.write(esp_data)
+                    os.chmod(tmp_esp, 0o666)
+                    os.replace(tmp_esp, '/data/esp32_wifi_sync.json')
+
+                    subprocess.run([
+                        'mosquitto_pub', '-h', '127.0.0.1', '-t', 'helios/esp32/wifi_config',
+                        '-r', '-q', '1', '-m', esp_data
+                    ], timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print("[portal.py] Credenciales Wi-Fi publicadas en helios/esp32/wifi_config para aprovisionamiento de nodos ESP32.")
+                except Exception as e_esp:
+                    print(f"[portal.py] Error publicando sincronización Wi-Fi hacia ESP32: {e_esp}")
             
             response_msg = b"<!DOCTYPE html><html><body style='background:#121212;color:#00bcd4;text-align:center;padding:50px;font-family:sans-serif;'><h2>Configuracion Aplicada</h2><p style='color:#fff;'>HeliOs procesara los parametros del arreglo solar y el Gateway se reiniciara.</p></body></html>"
             

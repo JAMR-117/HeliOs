@@ -70,6 +70,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final content = readConfigFile('/data/forecast.json');
       if (content == null) return;
       final List<dynamic> all = json.decode(content);
+      if (all.isEmpty) return;
 
       final int nowEpoch =
           DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
@@ -86,9 +87,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }).toList();
 
-      final List<dynamic> next24 = filtered.take(24).toList();
+      // Si filtered tiene datos lo usamos; si quedó vacío por desfase de reloj tras reboot,
+      // usamos las primeras 24 horas del pronóstico para renderizado instantáneo (<2s)
+      final List<dynamic> displayData =
+          filtered.isNotEmpty ? filtered.take(24).toList() : all.take(24).toList();
       if (!mounted) return;
-      setState(() => _forecastData = next24);
+      setState(() => _forecastData = displayData);
     } catch (e) {
       debugPrint("Error leyendo pronóstico: $e");
     }
@@ -117,6 +121,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final double? motorEl    = (spa['motor_elevation']  as num?)?.toDouble() ??
         (spa['elevation'] as num?)?.toDouble();
 
+    final double currentAngle = mqttService.currentAngle;
+    final double targetAngle  = mqttService.targetAngle;
+    final bool isStow         = mqttService.isStow;
+    final double windKmh      = mqttService.windKmh;
+
     // Estado centralizado de tema (Día vs Noche)
     final bool isNight = mqttService.isNight;
 
@@ -132,6 +141,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (scadaCode != 0) {
       hasError = true;
       alertMessage = "FALLA SCADA ($scadaCode): ${scadaDesc.toUpperCase()}";
+    } else if (windKmh >= 50.0) {
+      hasError = true;
+      alertMessage = "FALLA SCADA (104): ¡VIENTO PELIGROSO! ESTIBA ACTIVA (0°)";
     } else if (!isNight &&
         realVoltage != null &&
         expVoltage != null &&
@@ -149,6 +161,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } else if (tempC != null && tempC > 65.0) {
       hasError = true;
       alertMessage = "FALLA SCADA (103): SOBRECALENTAMIENTO EN INVERSOR";
+    } else if (isStow) {
+      alertMessage = "MODO ESTIBA (0°) - PANELES EN POSICIÓN SEGURA";
     } else if (isNight) {
       alertMessage = "MODO NOCTURNO - PANELES EN ESTIBA";
     } else if (telemetry.isNotEmpty) {
@@ -647,11 +661,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       isNight: isNight,
                     ),
 
-                    // Tarjeta fusionada: Ángulo Óptimo (Motores)
+                    // Tarjeta Seguidor SAT (1 Eje)
                     _buildMetricCard(
-                      title: 'Ángulo Óptimo (Motores)',
-                      realValue: 'Az: $motorAzStr° | El: $motorElStr°',
-                      expValue: motorSubtitle,
+                      title: 'Inclinación del Seguidor (SAT)',
+                      realValue: '${currentAngle.toStringAsFixed(1)}°',
+                      expValue: 'Óptimo calculado: ${targetAngle.toStringAsFixed(1)}° | ${isStow ? "MODO ESTIBA (0°)" : "Seguimiento Activo"}',
                       icon: Icons.solar_power,
                       cardColor: cardColor,
                       cardBorderColor: cardBorderColor,
@@ -659,8 +673,135 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       primaryColor: textPrimary,
                       accentColor: isNight ? accentSolar : accentWarm,
                       isComparison: false,
-                      valueFontSize: 16,
+                      valueFontSize: 24,
                       isNight: isNight,
+                    ),
+
+                    // Tarjeta interactiva: Velocidad del Viento
+                    Builder(
+                      builder: (cardCtx) {
+                        final bool isWindWarning = windKmh >= 35.0 && windKmh < 50.0;
+                        final bool isWindCritical = windKmh >= 50.0;
+
+                        final Color windCardBg = isWindCritical
+                            ? Colors.red.shade900.withValues(alpha: isNight ? 0.45 : 0.28)
+                            : (isWindWarning
+                                ? Colors.amber.shade900.withValues(alpha: isNight ? 0.35 : 0.20)
+                                : cardColor);
+
+                        final Color windCardBorder = isWindCritical
+                            ? Colors.redAccent
+                            : (isWindWarning
+                                ? Colors.orange.shade600
+                                : cardBorderColor);
+
+                        final double windBorderWidth = (isWindCritical || isWindWarning) ? 2.0 : 1.0;
+
+                        final Color windIconColor = isWindCritical
+                            ? Colors.redAccent
+                            : (isWindWarning ? Colors.orangeAccent : accentSolar);
+
+                        final String windSubtitle = isWindCritical
+                            ? "¡VIENTO PELIGROSO! ESTIBA ACTIVA (0°)"
+                            : (isWindWarning
+                                ? "VIENTO GRAVE - PRECAUCIÓN"
+                                : "Viento Normal - Operación Segura");
+
+                        final Color windSubtitleColor = isWindCritical
+                            ? Colors.redAccent
+                            : (isWindWarning ? Colors.orange.shade300 : textMuted);
+
+                        return GestureDetector(
+                          onTap: () => _showWindProtectionModal(
+                            context: context,
+                            windKmh: windKmh,
+                            currentAngle: currentAngle,
+                            isStow: isStow,
+                            isNight: isNight,
+                            palette: palette,
+                            mqttService: mqttService,
+                          ),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: windCardBg,
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: windCardBorder, width: windBorderWidth),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: isWindCritical
+                                      ? Colors.red.withValues(alpha: 0.3)
+                                      : (isWindWarning
+                                          ? Colors.orange.withValues(alpha: 0.2)
+                                          : (isNight
+                                              ? Colors.black.withValues(alpha: 0.25)
+                                              : HeliosTheme.blueFantastic.withValues(alpha: 0.06))),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        'Velocidad del Viento',
+                                        style: TextStyle(
+                                          color: isWindCritical || isWindWarning
+                                              ? windSubtitleColor
+                                              : textMuted,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.all(6),
+                                      decoration: BoxDecoration(
+                                        color: windIconColor.withValues(alpha: 0.15),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Icon(Icons.air, color: windIconColor, size: 18),
+                                    ),
+                                  ],
+                                ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '${windKmh.toStringAsFixed(1)} km/h',
+                                      style: TextStyle(
+                                        color: textPrimary,
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      windSubtitle,
+                                      style: TextStyle(
+                                        color: windSubtitleColor,
+                                        fontSize: 10,
+                                        fontWeight: isWindCritical || isWindWarning
+                                            ? FontWeight.bold
+                                            : FontWeight.normal,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
                     ),
 
                     // Tarjeta clickeable: Estado del Sistema
@@ -752,6 +893,218 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  void _showWindProtectionModal({
+    required BuildContext context,
+    required double windKmh,
+    required double currentAngle,
+    required bool isStow,
+    required bool isNight,
+    required WeatherPalette palette,
+    required MqttService mqttService,
+  }) {
+    final Color dialogBg = isNight ? const Color(0xFF1E293B) : Colors.white;
+    final Color textPri = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
+    final Color textMut = isNight ? HeliosTheme.oatmeal : const Color(0xFF64748B);
+    final bool isDangerous = windKmh >= 50.0;
+    final bool isWarning = windKmh >= 35.0 && windKmh < 50.0;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final bool currentManual = mqttService.manualStow;
+            final bool currentStow = mqttService.isStow;
+            final double currentDeg = mqttService.currentAngle;
+
+            return AlertDialog(
+              backgroundColor: dialogBg,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+                side: BorderSide(
+                  color: isDangerous
+                      ? Colors.redAccent
+                      : (isWarning ? Colors.orangeAccent : palette.cardBorderColor),
+                  width: isDangerous || isWarning ? 2 : 1,
+                ),
+              ),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: (isDangerous ? Colors.red : (isWarning ? Colors.orange : palette.accentSolar))
+                          .withValues(alpha: 0.15),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.air,
+                      color: isDangerous ? Colors.redAccent : (isWarning ? Colors.orangeAccent : palette.accentSolar),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Protección por Viento',
+                      style: TextStyle(
+                        color: textPri,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Métrica Actual de Viento
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: (isDangerous ? Colors.red : (isWarning ? Colors.orange : palette.cardColor))
+                            .withValues(alpha: isNight ? 0.20 : 0.10),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isDangerous
+                              ? Colors.redAccent
+                              : (isWarning ? Colors.orangeAccent : palette.cardBorderColor),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'VELOCIDAD MEDIDA',
+                                style: TextStyle(
+                                  color: textMut,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.0,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '${windKmh.toStringAsFixed(1)} km/h',
+                                style: TextStyle(
+                                  color: isDangerous
+                                      ? Colors.redAccent
+                                      : (isWarning ? Colors.orangeAccent : textPri),
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: (isDangerous ? Colors.red : (isWarning ? Colors.orange : Colors.green))
+                                  .withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              isDangerous
+                                  ? 'PELIGRO (≥50 km/h)'
+                                  : (isWarning ? 'PRECAUCIÓN (≥35 km/h)' : 'NORMAL (<35 km/h)'),
+                              style: TextStyle(
+                                color: isDangerous
+                                    ? Colors.redAccent
+                                    : (isWarning ? Colors.orangeAccent : Colors.green),
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Estado actual de los paneles
+                    Row(
+                      children: [
+                        Text('Estado de Paneles: ', style: TextStyle(color: textMut, fontSize: 13)),
+                        Text(
+                          currentStow
+                              ? 'En Posición de Estiba a 0.0°'
+                              : 'En Seguimiento Normal (${currentDeg.toStringAsFixed(1)}°)',
+                          style: TextStyle(
+                            color: currentStow ? Colors.orangeAccent : Colors.green,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Mensaje explicativo
+                    Text(
+                      'Protección Mecánica Aerodinámica:\n'
+                      'Las ráfagas intensas pueden inducir torsión y fuerzas de sustentación que dañan '
+                      'los rodamientos y actuadores. Ante vientos ≥50 km/h, el sistema activa automáticamente '
+                      'la Estiba Plana (0.0° horizontal) para reducir el arrastre aerodinámico.',
+                      style: TextStyle(color: textMut, fontSize: 12, height: 1.4),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Botón de acción directa de Estiba Manual
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: currentManual
+                              ? Colors.green.withValues(alpha: 0.2)
+                              : Colors.orange.withValues(alpha: 0.2),
+                          foregroundColor: currentManual ? Colors.green : Colors.orangeAccent,
+                          side: BorderSide(
+                            color: currentManual ? Colors.green : Colors.orangeAccent,
+                            width: 1.5,
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                        icon: Icon(
+                          currentManual ? Icons.play_arrow : Icons.pan_tool,
+                          size: 18,
+                        ),
+                        label: Text(
+                          currentManual
+                              ? 'Desactivar Estiba Manual y Retomar Seguimiento'
+                              : 'Activar Modo Estiba Manual (llevar paneles a 0°)',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        ),
+                        onPressed: () {
+                          final bool newStow = !currentManual;
+                          mqttService.publishTrackerCommand(manualStow: newStow);
+                          setModalState(() {});
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text('Cerrar', style: TextStyle(color: textPri)),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 

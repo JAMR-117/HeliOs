@@ -42,10 +42,53 @@ class MqttService extends ChangeNotifier {
 
   Map<String, dynamic> telemetryData = {};
   Map<String, dynamic> spaData = {};
+  Map<String, dynamic> trackerData = {};
   Map<String, dynamic> scadaData = {
     "code": 0,
     "description": "Operación Normal",
   };
+
+  DateTime? _lastTrackerPacketTime;
+  bool get isTrackerConnected =>
+      _lastTrackerPacketTime != null &&
+      DateTime.now().difference(_lastTrackerPacketTime!).inSeconds <= 15;
+
+  double? _environmentWind;
+  bool manualStow = false;
+
+  /// Ángulo objetivo calculado por el algoritmo solar (SAT)
+  double get targetAngle =>
+      (spaData['target_angle'] as num?)?.toDouble() ??
+      (spaData['motor_angle'] as num?)?.toDouble() ??
+      0.0;
+
+  /// Estado de Estiba (Flat-Stow a 0.0°)
+  bool get isStow =>
+      (spaData['is_stow'] as bool?) ??
+      manualStow ||
+      (targetAngle == 0.0 && isNight);
+
+  /// Ángulo actual de los paneles fotovoltaicos
+  double get currentAngle {
+    if (isTrackerConnected && trackerData.containsKey('current_angle')) {
+      return (trackerData['current_angle'] as num).toDouble();
+    }
+    return targetAngle;
+  }
+
+  /// Velocidad del viento activa (con prioridad al sensor/simulador externo)
+  double get windKmh {
+    if (telemetryData.containsKey('wind_kmh')) {
+      return (telemetryData['wind_kmh'] as num).toDouble();
+    }
+    if (_environmentWind != null) {
+      return _environmentWind!;
+    }
+    if (spaData.containsKey('wind_kmh')) {
+      return (spaData['wind_kmh'] as num).toDouble();
+    }
+    return 12.0;
+  }
 
   // --- OVERRIDE TEMPORAL DE CLIMA (DESDE SIMULADOR) ---
   String? _overrideWeatherState;
@@ -151,6 +194,14 @@ class MqttService extends ChangeNotifier {
     final double vExp = (spaData['v_exp'] as num?)?.toDouble() ?? 0.0;
     final double pExp = (spaData['p_exp'] as num?)?.toDouble() ?? 0.0;
 
+    // Prioridad Absoluta: Alerta por Viento Peligroso (>= 50 km/h) -> Código 104
+    if (windKmh >= 50.0) {
+      const desc = "Alerta de Viento Peligroso - Estiba de Emergencia Activada (0°)";
+      scadaData = {"inverter": 1, "code": 104, "description": desc};
+      _recordSessionError(104, desc);
+      return;
+    }
+
     // Solo evaluar si hay telemetría activa del inversor
     if (!isInverterConnected && telemetryData.isEmpty) return;
 
@@ -188,21 +239,29 @@ class MqttService extends ChangeNotifier {
   }
 
   Future<void> connect(String brokerIp) async {
-    _client = createMqttClient(brokerIp, 'helios_hmi_client');
-    _client!.keepAlivePeriod = 20;
-    _client!.autoReconnect = true;
-    _client!.logging(on: false);
-
-    final connMessage = MqttConnectMessage()
-        .withClientIdentifier('helios_hmi_client')
-        .startClean()
-        .withWillQos(MqttQos.atLeastOnce);
-    _client!.connectionMessage = connMessage;
+    int retryAttempt = 0;
+    StreamSubscription? updatesSub;
 
     void attemptConnect() async {
       try {
+        updatesSub?.cancel();
+        _client?.disconnect();
+
+        final clientId = 'helios_hmi_${DateTime.now().millisecondsSinceEpoch % 10000}';
+        _client = createMqttClient(brokerIp, clientId);
+        _client!.keepAlivePeriod = 20;
+        _client!.autoReconnect = true;
+        _client!.logging(on: false);
+
+        final connMessage = MqttConnectMessage()
+            .withClientIdentifier(clientId)
+            .startClean()
+            .withWillQos(MqttQos.atLeastOnce);
+        _client!.connectionMessage = connMessage;
+
         await _client!.connect();
         isConnected = true;
+        retryAttempt = 0;
         notifyListeners();
 
         _client!.subscribe("helios/inverter/telemetry", MqttQos.atLeastOnce);
@@ -210,8 +269,12 @@ class MqttService extends ChangeNotifier {
         _client!.subscribe("helios/spa/coordinates", MqttQos.atLeastOnce);
         _client!.subscribe("helios/scada/alerts", MqttQos.atLeastOnce);
         _client!.subscribe("helios/weather/override", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/tracker/status", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/tracker/command", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/environment/wind", MqttQos.atLeastOnce);
+        _client!.subscribe("helios/esp32/wifi_config", MqttQos.atLeastOnce);
 
-        _client!.updates!.listen((List<MqttReceivedMessage<MqttMessage>> c) {
+        updatesSub = _client!.updates!.listen((List<MqttReceivedMessage<MqttMessage>> c) {
           final recMess = c[0].payload as MqttPublishMessage;
           final payload = MqttPublishPayload.bytesToStringAsString(
             recMess.payload.message,
@@ -233,6 +296,7 @@ class MqttService extends ChangeNotifier {
                   101: "Pérdida de Panel en Serie Detectada (Caída de Voltaje DC)",
                   102: "Sombreo o Suciedad en Arreglo Fotovoltaico (Baja Potencia)",
                   103: "Sobrecalentamiento en Inversor (> 65°C)",
+                  104: "Alerta de Viento Peligroso - Estiba de Emergencia Activada (0°)",
                 };
                 _recordSessionError(
                   fault,
@@ -246,6 +310,18 @@ class MqttService extends ChangeNotifier {
               spaData.addAll(data);
               _checkAnalyticalAnomalies();
               _recordPowerPoint();
+            } else if (topic == "helios/tracker/status") {
+              _lastTrackerPacketTime = DateTime.now();
+              trackerData = data;
+            } else if (topic == "helios/tracker/command") {
+              if (data.containsKey('manual_stow')) {
+                manualStow = data['manual_stow'] as bool? ?? false;
+              }
+            } else if (topic == "helios/environment/wind") {
+              if (data.containsKey('wind_kmh')) {
+                _environmentWind = (data['wind_kmh'] as num?)?.toDouble();
+              }
+              _checkAnalyticalAnomalies();
             } else if (topic == "helios/scada/alerts") {
               scadaData = data;
               final int code = (data['code'] as num?)?.toInt() ?? 0;
@@ -274,11 +350,53 @@ class MqttService extends ChangeNotifier {
         isConnected = false;
         notifyListeners();
         _client?.disconnect();
-        Future.delayed(const Duration(seconds: 5), attemptConnect);
+        retryAttempt++;
+        // Reintentos ultrarrápidos tras el reinicio: 500ms, luego 1s, luego 2s
+        final int delayMs = retryAttempt <= 2 ? 500 : (retryAttempt <= 4 ? 1000 : 2000);
+        Future.delayed(Duration(milliseconds: delayMs), attemptConnect);
       }
     }
 
     attemptConnect();
+  }
+
+  void publishTrackerCommand({bool? manualStow, double? targetAngle}) {
+    if (_client != null && isConnected) {
+      final builder = MqttClientPayloadBuilder();
+      final map = <String, dynamic>{};
+      if (manualStow != null) {
+        this.manualStow = manualStow;
+        map['manual_stow'] = manualStow;
+      }
+      if (targetAngle != null) map['target_angle'] = targetAngle;
+      builder.addString(json.encode(map));
+      _client!.publishMessage(
+        'helios/tracker/command',
+        MqttQos.atLeastOnce,
+        builder.payload!,
+        retain: true,
+      );
+      notifyListeners();
+    }
+  }
+
+  void publishEsp32WifiConfig(String ssid, String pass, [String? brokerIp]) {
+    if (_client != null && isConnected) {
+      final builder = MqttClientPayloadBuilder();
+      final map = <String, dynamic>{
+        'ssid': ssid,
+        'pass': pass,
+        if (brokerIp != null && brokerIp.isNotEmpty) 'broker_ip': brokerIp,
+        'timestamp': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      };
+      builder.addString(json.encode(map));
+      _client!.publishMessage(
+        'helios/esp32/wifi_config',
+        MqttQos.atLeastOnce,
+        builder.payload!,
+        retain: true,
+      );
+    }
   }
 
   void publishConfigReload() {

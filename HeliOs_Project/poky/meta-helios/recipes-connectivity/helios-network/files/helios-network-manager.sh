@@ -35,6 +35,17 @@ if [ $FORCE_RECONNECT -eq 0 ]; then
         echo "[HeliOs Network] wlan0 ya cuenta con IP asignada por DHCP. Manteniendo enlace activo."
         chmod 777 /data 2>/dev/null || true
         chmod 666 "$CONFIG_FILE" 2>/dev/null || true
+        RPI_IP=$(ip -4 a show wlan0 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1 | head -n 1)
+        if [ -f "$CONFIG_FILE" ] && [ -n "$RPI_IP" ]; then
+            SSID=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('ssid', ''))" 2>/dev/null || true)
+            PASS=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('pass', ''))" 2>/dev/null || true)
+            if [ -n "$SSID" ]; then
+                ESP_PAYLOAD=$(python3 -c "import json, time; print(json.dumps({'ssid':'$SSID', 'pass':'$PASS', 'broker_ip':'$RPI_IP', 'timestamp':time.time()}))" 2>/dev/null || true)
+                mosquitto_pub -h 127.0.0.1 -t "helios/esp32/wifi_config" -r -q 1 -m "$ESP_PAYLOAD" 2>/dev/null || true
+                echo "$ESP_PAYLOAD" > /data/esp32_wifi_sync.json 2>/dev/null || true
+                chmod 666 /data/esp32_wifi_sync.json 2>/dev/null || true
+            fi
+        fi
         exit 0
     fi
 fi
@@ -103,6 +114,18 @@ try:
 except Exception as e:
     print('[HeliOs Network] No se pudo sincronizar reloj HTTP:', e)
 " 2>/dev/null || true
+
+        # Sincronización Wi-Fi hacia ESP32 con la IP real del broker en la LAN
+        RPI_IP=$(ip -4 a show wlan0 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1 | head -n 1)
+        if [ -n "$SSID" ] && [ -n "$RPI_IP" ]; then
+            echo "[HeliOs Network] Publicando sincronización Wi-Fi para ESP32 (broker IP: $RPI_IP)..."
+            ESP_PAYLOAD=$(python3 -c "import json, time; print(json.dumps({'ssid':'$SSID', 'pass':'$PASS', 'broker_ip':'$RPI_IP', 'timestamp':time.time()}))" 2>/dev/null || true)
+            if [ -n "$ESP_PAYLOAD" ]; then
+                mosquitto_pub -h 127.0.0.1 -t "helios/esp32/wifi_config" -r -q 1 -m "$ESP_PAYLOAD" 2>/dev/null || true
+                echo "$ESP_PAYLOAD" > /data/esp32_wifi_sync.json 2>/dev/null || true
+                chmod 666 /data/esp32_wifi_sync.json 2>/dev/null || true
+            fi
+        fi
 
         # Notificar a los daemons activos por MQTT para recargar reloj y efemérides en caliente
         echo "[HeliOs Network] Notificando recarga de efemérides solares vía MQTT..."

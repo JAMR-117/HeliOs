@@ -30,6 +30,10 @@ if "last_rpi_ip" not in st.session_state:
     st.session_state["last_rpi_ip"] = "192.168.1.64"
 if "yield_kwh" not in st.session_state:
     st.session_state["yield_kwh"] = 125.40
+if "sim_wind_kmh" not in st.session_state:
+    st.session_state["sim_wind_kmh"] = 18.0
+if "sim_panel_angle" not in st.session_state:
+    st.session_state["sim_panel_angle"] = 0.0
 
 # Diccionario SunSpec para interfaz manual
 SUNSPEC_ERRORS = {
@@ -40,6 +44,7 @@ SUNSPEC_ERRORS = {
     101: "101: Pérdida de Panel en Serie (Caída Voltaje DC)",
     102: "102: Sombreo o Suciedad en Arreglo (Baja Potencia)",
     103: "103: Sobrecalentamiento en Inversor (>65°C)",
+    104: "104: Alerta de Viento Peligroso - Estiba de Emergencia (0°)",
 }
 
 # Fallback de configuración de paneles
@@ -170,6 +175,39 @@ def publish_weather_override(ip: str, payload: dict):
                 "Verifique que la IP sea correcta y que el equipo esté encendido en la misma red."
             )
 
+def publish_wind_telemetry(ip: str, wind_kmh: float):
+    """Publica en helios/environment/wind con reintento automático."""
+    client, connected, err = get_or_create_mqtt_client(ip)
+    if not connected:
+        return False, err
+    try:
+        msg = client.publish("helios/environment/wind", json.dumps({"wind_kmh": round(wind_kmh, 1)}), retain=False)
+        msg.wait_for_publish(timeout=3.0)
+        return True, "Velocidad de viento inyectada al broker."
+    except Exception:
+        return False, "Error al publicar en helios/environment/wind."
+
+def publish_tracker_status(ip: str, current_angle: float, target_angle: float = 0.0, is_stow: bool = False):
+    """Publica en helios/tracker/status para sincronizar el ángulo físico en Flutter."""
+    client, connected, err = get_or_create_mqtt_client(ip)
+    if not connected:
+        return False, err
+    try:
+        payload = {
+            "current_angle": round(current_angle, 1),
+            "target_angle": round(target_angle, 1),
+            "is_stow": is_stow,
+            "motor_moving": False,
+            "pca9685_connected": True,
+            "rssi": -55
+        }
+        msg = client.publish("helios/tracker/status", json.dumps(payload), retain=False)
+        msg.wait_for_publish(timeout=3.0)
+        return True, "Estado del seguidor inyectado al broker."
+    except Exception:
+        return False, "Error al publicar en helios/tracker/status."
+
+
 # ===========================================================
 # CÁLCULO LOCAL DE IRRADIANCIA (fallback si no hay broker)
 # ===========================================================
@@ -291,6 +329,7 @@ if modo == "Modo Automático Continuo (Clear Sky)":
             "power_w":   power_w,
             "temp_c":    temp_c,
             "yield_kwh": round(st.session_state["yield_kwh"], 2),
+            "wind_kmh":  round(float(st.session_state.get("sim_wind_kmh", 18.0)), 1),
             "fault":     0,
         }
 
@@ -352,6 +391,7 @@ else:
             "power_w":   power_w,
             "temp_c":    temp_c_manual,
             "yield_kwh": round(st.session_state["yield_kwh"], 2),
+            "wind_kmh":  round(float(st.session_state.get("sim_wind_kmh", 18.0)), 1),
             "fault":     int(falla_seleccionada),
         }
 
@@ -425,4 +465,70 @@ if st.button("🌦️ Enviar Clima Temporal a la HMI", type="primary", use_conta
         )
     else:
         st.error(w_msg)
+
+# ===========================================================
+# 💨 SIMULACIÓN DE VIENTO Y ÁNGULO DEL SEGUIDOR (SAT)
+# ===========================================================
+st.divider()
+st.subheader("💨 Simulación de Viento y Control de Ángulo del Seguidor (SAT)")
+st.markdown(
+    "Control de variables ambientales y mecánicas para probar la protección por viento, "
+    "los cambios de color en la HMI y la estiba de emergencia a 0.0°."
+)
+
+col_w1, col_w2 = st.columns([1, 1])
+with col_w1:
+    viento_slider = st.slider(
+        "Velocidad del Viento (km/h)",
+        min_value=0.0,
+        max_value=80.0,
+        value=float(st.session_state["sim_wind_kmh"]),
+        step=0.5,
+        help="<35 km/h: Normal (Verde) | 35-50 km/h: Advertencia (Ámbar) | >=50 km/h: Peligro y Estiba (Rojo)"
+    )
+    st.session_state["sim_wind_kmh"] = viento_slider
+
+    # Indicador de estado de viento
+    if viento_slider < 35.0:
+        st.success(f"🟢 **Viento Normal ({viento_slider:.1f} km/h)** — Operación Segura")
+    elif viento_slider < 50.0:
+        st.warning(f"🟠 **VIENTO GRAVE - PRECAUCIÓN ({viento_slider:.1f} km/h)** — Monitoreo reforzado")
+    else:
+        st.error(f"🔴 **¡VIENTO PELIGROSO! ({viento_slider:.1f} km/h)** — Estiba Activa a 0.0° y Alerta SCADA 104")
+
+with col_w2:
+    is_wind_danger = viento_slider >= 50.0
+    default_angle = 0.0 if is_wind_danger else float(st.session_state["sim_panel_angle"])
+    angulo_slider = st.slider(
+        "Ángulo Físico de Paneles (°)",
+        min_value=-60.0,
+        max_value=60.0,
+        value=default_angle,
+        step=0.5,
+        disabled=is_wind_danger,
+        help="0.0° es Estiba Horizontal Flat-Stow (-60° Este a +60° Oeste)"
+    )
+    st.session_state["sim_panel_angle"] = 0.0 if is_wind_danger else angulo_slider
+
+    if is_wind_danger:
+        st.error("🛡️ **Posición de Estiba Forzada: 0.0°** por ráfagas de viento.")
+    else:
+        st.info(f"📐 Ángulo de paneles simulado: **{angulo_slider:+.1f}°**")
+
+if st.button("💨 Inyectar Viento y Ángulo a la Planta", type="primary", use_container_width=True):
+    w_ok, w_msg = publish_wind_telemetry(rpi_ip, viento_slider)
+    t_ok, t_msg = publish_tracker_status(
+        rpi_ip,
+        current_angle=0.0 if is_wind_danger else angulo_slider,
+        target_angle=0.0 if is_wind_danger else angulo_slider,
+        is_stow=is_wind_danger
+    )
+    if w_ok and t_ok:
+        st.success(
+            f"✅ Telemetría inyectada con éxito: Viento {viento_slider:.1f} km/h | "
+            f"Ángulo {0.0 if is_wind_danger else angulo_slider:+.1f}° (Estiba={is_wind_danger})."
+        )
+    else:
+        st.error(f"Error al enviar datos: {w_msg} / {t_msg}")
+
 

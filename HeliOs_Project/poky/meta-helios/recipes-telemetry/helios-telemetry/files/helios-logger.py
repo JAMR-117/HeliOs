@@ -111,8 +111,9 @@ def on_connect(client, userdata, flags, reason_code, properties):
             ("helios/spa/expected",       0),
             ("helios/inverter/telemetry", 0),
             ("helios/scada/alerts",       0),
+            ("helios/environment/wind",   0),
         ])
-        print("[INFO] HeliOs Logger: suscrito a tópicos MQTT.")
+        print("[INFO] HeliOs Logger: suscrito a tópicos MQTT (incluyendo viento).")
     else:
         print(f"[WARN] helios-logger: Conexión rechazada, reason_code={reason_code}")
 
@@ -130,6 +131,16 @@ def on_message(client, userdata, msg):
     if topic == "helios/spa/expected":
         state["p_exp"] = float(data.get("p_exp", 0.0))
         state["is_night"] = bool(data.get("is_night", True))
+        wind_kmh = float(data.get("wind_kmh", 0.0))
+        if wind_kmh >= 50.0:
+            insert_alert(now, 104, "Alerta de Viento Peligroso - Estiba de Emergencia Activada (0°)")
+        return
+
+    # --- Telemetría de viento ambiental ---
+    if topic == "helios/environment/wind":
+        wind_kmh = float(data.get("wind_kmh", 0.0))
+        if wind_kmh >= 50.0:
+            insert_alert(now, 104, "Alerta de Viento Peligroso - Estiba de Emergencia Activada (0°)")
         return
 
     # --- Telemetría del inversor → persistir en telemetry_log y auditar fallas ---
@@ -138,8 +149,13 @@ def on_message(client, userdata, msg):
         v_real = float(data.get("v_dc",    0.0))
         i_real = float(data.get("i_dc",    0.0))
         fault = int(data.get("fault", 0))
+        wind_kmh = float(data.get("wind_kmh", 0.0))
 
         insert_telemetry(now, p_real, state["p_exp"], v_real, i_real)
+
+        # Si el inversor reporta viento peligroso
+        if wind_kmh >= 50.0:
+            insert_alert(now, 104, "Alerta de Viento Peligroso - Estiba de Emergencia Activada (0°)")
 
         # Registrar fallas de inversor SunSpec directamente si fault != 0
         if fault != 0:
@@ -150,6 +166,7 @@ def on_message(client, userdata, msg):
                 101: "Pérdida de Panel en Serie Detectada (Caída de Voltaje DC)",
                 102: "Sombreo o Suciedad en Arreglo Fotovoltaico (Baja Potencia)",
                 103: "Sobrecalentamiento en Inversor (> 65°C)",
+                104: "Alerta de Viento Peligroso - Estiba de Emergencia Activada (0°)",
             }
             desc = sunspec_names.get(fault, f"Falla Inversor SunSpec código {fault}")
             insert_alert(now, fault, desc)
