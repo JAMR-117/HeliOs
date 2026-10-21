@@ -1,17 +1,22 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:fl_chart/fl_chart.dart';
 
 import '../services/mqtt_service.dart';
+import '../services/web_telemetry_service.dart';
+import '../theme/helios_animations.dart';
 import '../theme/helios_theme.dart';
 import '../theme/weather_palette.dart';
 import '../database/db_platform.dart';
 import 'scada_errors_screen.dart';
 import 'plant_config_screen.dart';
+import 'widgets/helios_bottom_nav_bar.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -21,14 +26,18 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   List<dynamic> _forecastData = [];
   Timer? _refreshTimer;
   Timer? _clockTimer;
   String _currentTimeStr = '--:--:--';
+  late PageController _pageController;
+  int _currentTabIndex = 0;
 
   @override
   void initState() {
     super.initState();
+    _pageController = PageController(initialPage: 0);
     _updateClock();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) => _updateClock());
 
@@ -60,15 +69,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   void dispose() {
+    _pageController.dispose();
     _refreshTimer?.cancel();
     _clockTimer?.cancel();
     super.dispose();
   }
 
+  void _onTabSelected(int index) {
+    if (index == _currentTabIndex) return;
+    setState(() {
+      _currentTabIndex = index;
+    });
+    _pageController.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   Future<void> _loadForecast() async {
     try {
       final content = readConfigFile('/data/forecast.json');
-      if (content == null) return;
+      if (content == null) {
+        if (kIsWeb && mounted) {
+          final webService = Provider.of<WebTelemetryService>(context, listen: false);
+          if (webService.forecastData.isNotEmpty) {
+            setState(() => _forecastData = webService.forecastData);
+          }
+        }
+        return;
+      }
       final List<dynamic> all = json.decode(content);
       if (all.isEmpty) return;
 
@@ -101,10 +131,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     final mqttService = context.watch<MqttService>();
+    final webService = kIsWeb ? context.watch<WebTelemetryService>() : null;
 
-    final telemetry = mqttService.telemetryData;
-    final spa = mqttService.spaData;
-    final scada = mqttService.scadaData;
+    final bool useWeb = kIsWeb &&
+        mqttService.telemetryData.isEmpty &&
+        mqttService.spaData.isEmpty &&
+        webService != null;
+
+    final telemetry = useWeb ? webService.telemetryData : mqttService.telemetryData;
+    final spa = useWeb ? webService.spaData : mqttService.spaData;
+    final scada = useWeb ? webService.scadaData : mqttService.scadaData;
 
     final double? realPower   = (telemetry['power_w']   as num?)?.toDouble();
     final double? realVoltage = (telemetry['v_dc']       as num?)?.toDouble();
@@ -116,18 +152,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final double? expVoltage = (spa['v_exp']            as num?)?.toDouble();
     final double? expCurrent = (spa['i_exp']            as num?)?.toDouble();
     final double? ghi        = (spa['ghi']              as num?)?.toDouble();
-    final double? motorAz    = (spa['motor_azimuth']    as num?)?.toDouble() ??
-        (spa['azimuth']   as num?)?.toDouble();
-    final double? motorEl    = (spa['motor_elevation']  as num?)?.toDouble() ??
-        (spa['elevation'] as num?)?.toDouble();
 
-    final double currentAngle = mqttService.currentAngle;
-    final double targetAngle  = mqttService.targetAngle;
-    final bool isStow         = mqttService.isStow;
-    final double windKmh      = mqttService.windKmh;
+    final double currentAngle = useWeb ? webService.currentAngle : mqttService.currentAngle;
+    final double targetAngle  = useWeb ? webService.targetAngle : mqttService.targetAngle;
+    final bool isStow         = useWeb ? webService.isStow : mqttService.isStow;
+    final double windKmh      = useWeb ? webService.windKmh : mqttService.windKmh;
 
     // Estado centralizado de tema (Día vs Noche)
-    final bool isNight = mqttService.isNight;
+    final bool isNight = useWeb ? webService.isNight : mqttService.isNight;
+    final bool isOnline = useWeb ? webService.isInverterConnected : mqttService.isInverterConnected;
 
     final int scadaCode = (scada['code'] as num?)?.toInt() ?? 0;
     final String scadaDesc = scada['description'] as String? ?? 'Operación Normal';
@@ -216,45 +249,42 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ? palette.accentSolar.withValues(alpha: 0.6)
             : palette.cardBorderColor;
 
-    final String motorAzStr = motorAz != null ? motorAz.toStringAsFixed(1) : '--';
-    final String motorElStr = motorEl != null ? motorEl.toStringAsFixed(1) : '--';
-    final String motorSubtitle = isNight
-        ? 'Posición de Estiba Plana (Seguridad)'
-        : 'Óptimo Solar Calculado';
+
 
     return Container(
       decoration: palette.rootDecoration,
       child: Scaffold(
-        extendBodyBehindAppBar: true,
+        key: _scaffoldKey,
+        extendBody: true,
+        extendBodyBehindAppBar: _currentTabIndex == 0,
         backgroundColor: Colors.transparent,
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          centerTitle: true,
-          // Óvalo / Círculo para menú hamburguesa
-          leading: Padding(
-            padding: const EdgeInsets.only(left: 12.0),
-            child: Center(
-              child: Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: palette.headerCapsuleBg,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: palette.headerCapsuleBorder, width: 1),
-                  boxShadow: palette.headerCapsuleShadow,
-                ),
-                child: Builder(
-                  builder: (ctx) => IconButton(
-                    icon: Icon(Icons.menu, color: palette.headerCapsuleText, size: 20),
-                    tooltip: 'Menú principal',
-                    padding: EdgeInsets.zero,
-                    onPressed: () => Scaffold.of(ctx).openDrawer(),
+        appBar: _currentTabIndex == 0
+            ? AppBar(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                centerTitle: true,
+                // Óvalo / Círculo para menú hamburguesa
+                leading: Padding(
+                  padding: const EdgeInsets.only(left: 12.0),
+                  child: Center(
+                    child: Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: palette.headerCapsuleBg,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: palette.headerCapsuleBorder, width: 1),
+                        boxShadow: palette.headerCapsuleShadow,
+                      ),
+                      child: IconButton(
+                        icon: Icon(Icons.menu, color: palette.headerCapsuleText, size: 20),
+                        tooltip: 'Menú principal',
+                        padding: EdgeInsets.zero,
+                        onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-          ),
           // Óvalo Central para Reloj (Alto Contraste)
           title: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
@@ -269,8 +299,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               children: [
                 Icon(Icons.access_time, color: palette.headerCapsuleText, size: 18),
                 const SizedBox(width: 8),
-                Text(
-                  _currentTimeStr,
+                AnimatedMetricText(
+                  text: _currentTimeStr,
                   style: TextStyle(
                     color: palette.headerCapsuleText,
                     fontSize: 15,
@@ -304,8 +334,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           size: 17,
                         ),
                         const SizedBox(width: 4),
-                        Text(
-                          '${tempC.toStringAsFixed(1)}°C',
+                        AnimatedMetricText(
+                          text: '${tempC.toStringAsFixed(1)}°C',
                           style: TextStyle(
                             color: tempC > 65 ? const Color(0xFFDC2626) : palette.headerCapsuleText,
                             fontSize: 12,
@@ -317,8 +347,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       if (yieldKwh != null) ...[
                         const Icon(Icons.bolt, color: Color(0xFFD97706), size: 17),
                         const SizedBox(width: 4),
-                        Text(
-                          '${yieldKwh.toStringAsFixed(1)} kWh',
+                        AnimatedMetricText(
+                          text: '${yieldKwh.toStringAsFixed(1)} kWh',
                           style: TextStyle(
                             color: palette.headerCapsuleText,
                             fontSize: 12,
@@ -327,14 +357,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                         const SizedBox(width: 6),
                       ],
-                      Icon(
-                        mqttService.isInverterConnected
-                            ? Icons.cloud_done
-                            : Icons.cloud_off,
-                        color: mqttService.isInverterConnected
-                            ? const Color(0xFF059669) // Verde esmeralda intenso
-                            : const Color(0xFFDC2626), // Rojo alerta
-                        size: 20,
+                      PulsingGlow(
+                        duration: const Duration(milliseconds: 2000),
+                        child: Icon(
+                          isOnline
+                              ? Icons.cloud_done
+                              : Icons.cloud_off,
+                          color: isOnline
+                              ? const Color(0xFF059669) // Verde esmeralda intenso
+                              : const Color(0xFFDC2626), // Rojo alerta
+                          size: 20,
+                        ),
                       ),
                     ],
                   ),
@@ -342,91 +375,132 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
           ],
-        ),
+        )
+      : null,
         drawer: Drawer(
           backgroundColor: palette.bgColor,
           child: Container(
             decoration: palette.rootDecoration,
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                DrawerHeader(
-                  decoration: BoxDecoration(
-                    color: palette.cardColor,
-                    border: Border(
-                      bottom: BorderSide(color: palette.cardBorderColor, width: 1),
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      Icon(
-                        isNight ? Icons.nightlight_round : Icons.solar_power,
-                        size: 44,
-                        color: palette.accentSolar,
+            child: Material(
+              color: Colors.transparent,
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  DrawerHeader(
+                    decoration: BoxDecoration(
+                      color: palette.cardColor,
+                      border: Border(
+                        bottom: BorderSide(color: palette.cardBorderColor, width: 1),
                       ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'HeliOs OS',
-                        style: TextStyle(
-                          color: palette.textPrimary,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Icon(
+                          isNight ? Icons.nightlight_round : Icons.solar_power,
+                          size: 44,
+                          color: palette.accentSolar,
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.dashboard, color: HeliosTheme.burningFlame),
-                  title: const Text(
-                    'Monitoreo Principal',
-                    style: TextStyle(
-                      color: HeliosTheme.burningFlame,
-                      fontWeight: FontWeight.bold,
+                        const SizedBox(height: 12),
+                        Text(
+                          'HeliOs OS',
+                          style: TextStyle(
+                            color: palette.textPrimary,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  selected: true,
-                  selectedTileColor: HeliosTheme.burningFlame.withValues(alpha: 0.15),
-                  onTap: () => Navigator.pop(context),
-                ),
-                ListTile(
-                  leading: Icon(Icons.warning_amber_rounded, color: textMuted),
-                  title: Text(
-                    'Menú de Errores SCADA',
-                    style: TextStyle(color: textPrimary),
+                  if (kIsWeb)
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: palette.accentSolar.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: palette.accentSolar.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.language, color: palette.accentSolar, size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Entorno Web • Telemetría Activa',
+                              style: TextStyle(
+                                color: palette.accentSolar,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ListTile(
+                    leading: const Icon(Icons.dashboard, color: HeliosTheme.burningFlame),
+                    title: const Text(
+                      'Monitoreo Principal',
+                      style: TextStyle(
+                        color: HeliosTheme.burningFlame,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    selected: _currentTabIndex == 0,
+                    selectedTileColor: HeliosTheme.burningFlame.withValues(alpha: 0.15),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _onTabSelected(0);
+                    },
                   ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => const ScadaErrorsScreen()),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: Icon(Icons.settings, color: textMuted),
-                  title: Text(
-                    'Configuración de Planta',
-                    style: TextStyle(color: textPrimary),
+                  ListTile(
+                    leading: Icon(Icons.warning_amber_rounded, color: textMuted),
+                    title: Text(
+                      'Menú de Errores SCADA',
+                      style: TextStyle(color: textPrimary),
+                    ),
+                    selected: _currentTabIndex == 1,
+                    selectedTileColor: HeliosTheme.burningFlame.withValues(alpha: 0.15),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _onTabSelected(1);
+                    },
                   ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => const PlantConfigScreen()),
-                    );
-                  },
-                ),
-              ],
+                  ListTile(
+                    leading: Icon(Icons.settings, color: textMuted),
+                    title: Text(
+                      'Configuración de Planta',
+                      style: TextStyle(color: textPrimary),
+                    ),
+                    selected: _currentTabIndex == 2,
+                    selectedTileColor: HeliosTheme.burningFlame.withValues(alpha: 0.15),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _onTabSelected(2);
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
         ),
-        body: SingleChildScrollView(
+        bottomNavigationBar: HeliosGlassBottomBar(
+          currentIndex: _currentTabIndex,
+          onTap: _onTabSelected,
+          hasActiveAlarm: hasError,
+          activeAlarmCode: scadaCode,
+          palette: palette,
+          isNight: isNight,
+        ),
+        body: PageView(
+          controller: _pageController,
+          physics: const NeverScrollableScrollPhysics(),
+          children: [
+            SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -458,43 +532,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const SizedBox(height: 12),
 
                     // --- CARRUSEL DE PRONÓSTICO (TAREA 3) ---
-                    Container(
-                      height: 132,
-                      decoration: BoxDecoration(
-                        color: cardColor,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: cardBorderColor, width: 1),
-                        boxShadow: [
-                          BoxShadow(
-                            color: isNight
-                                ? Colors.black.withValues(alpha: 0.25)
-                                : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
-                            blurRadius: 8,
-                            offset: const Offset(0, 3),
-                          )
-                        ],
-                      ),
-                      child: _forecastData.isEmpty
-                          ? Center(
-                              child: Text(
-                                "Sincronizando efemérides solares...",
-                                style: TextStyle(color: textMuted),
-                              ),
-                            )
-                          : ScrollConfiguration(
-                              behavior: ScrollConfiguration.of(context).copyWith(
-                                dragDevices: {
-                                  PointerDeviceKind.touch,
-                                  PointerDeviceKind.mouse,
-                                  PointerDeviceKind.trackpad,
-                                },
-                              ),
-                              child: ListView.builder(
-                                scrollDirection: Axis.horizontal,
-                                physics: const BouncingScrollPhysics(),
-                                itemCount: _forecastData.length,
-                                itemBuilder: (context, index) {
-                                  final item = _forecastData[index];
+                    Builder(
+                      builder: (ctx) {
+                        final List<dynamic> activeForecast = _forecastData.isNotEmpty
+                            ? _forecastData
+                            : (useWeb ? webService.forecastData : []);
+
+                        return StaggeredEntrance(
+                          index: 0,
+                          child: Container(
+                            height: 132,
+                            decoration: BoxDecoration(
+                              color: cardColor,
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: cardBorderColor, width: 1),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: isNight
+                                      ? Colors.black.withValues(alpha: 0.25)
+                                      : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
+                                )
+                              ],
+                            ),
+                          child: activeForecast.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    "Sincronizando efemérides solares...",
+                                    style: TextStyle(color: textMuted),
+                                  ),
+                                )
+                              : ScrollConfiguration(
+                                  behavior: ScrollConfiguration.of(context).copyWith(
+                                    dragDevices: {
+                                      PointerDeviceKind.touch,
+                                      PointerDeviceKind.mouse,
+                                      PointerDeviceKind.trackpad,
+                                    },
+                                  ),
+                                  child: ListView.builder(
+                                    scrollDirection: Axis.horizontal,
+                                    physics: const BouncingScrollPhysics(),
+                                    itemCount: activeForecast.length,
+                                    itemBuilder: (context, index) {
+                                      final item = activeForecast[index];
                                   final double fGhi =
                                       (item['ghi'] as num).toDouble();
                                   final double pExpFore =
@@ -511,71 +593,77 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                   final int itemCloudCover =
                                       (item['cloud_cover'] as num?)?.toInt() ?? 0;
 
-                                  return Container(
-                                    width: 82.0,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 6.0,
-                                      vertical: 8.0,
-                                    ),
-                                    child: Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.spaceAround,
-                                      children: [
-                                        Text(
-                                          horaStr,
-                                          style: TextStyle(
-                                            color: textMuted,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        if (fechaStr.isNotEmpty)
+                                  return HoverCard(
+                                    scaleFactor: 1.05,
+                                    child: Container(
+                                      width: 82.0,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6.0,
+                                        vertical: 8.0,
+                                      ),
+                                      child: Column(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceAround,
+                                        children: [
                                           Text(
-                                            fechaStr,
+                                            horaStr,
                                             style: TextStyle(
                                               color: textMuted,
-                                              fontSize: 10,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w600,
                                             ),
                                           ),
-                                        _buildHourlyWeatherIcon(
-                                          itemWeatherState,
-                                          itemCloudCover,
-                                          isNight,
-                                          isDay,
-                                        ),
-                                        if (itemWeatherState == 'rain' ||
-                                            itemWeatherState == 'storm' ||
-                                            (itemCloudCover > 0 && !isDay))
+                                          if (fechaStr.isNotEmpty)
+                                            Text(
+                                              fechaStr,
+                                              style: TextStyle(
+                                                color: textMuted,
+                                                fontSize: 10,
+                                              ),
+                                            ),
+                                          _buildHourlyWeatherIcon(
+                                            itemWeatherState,
+                                            itemCloudCover,
+                                            isNight,
+                                            isDay,
+                                          ),
+                                          if (itemWeatherState == 'rain' ||
+                                              itemWeatherState == 'storm' ||
+                                              (itemCloudCover > 0 && !isDay))
+                                            Text(
+                                              '$itemCloudCover%',
+                                              style: const TextStyle(
+                                                color: Color(0xFF38BDF8),
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
                                           Text(
-                                            '$itemCloudCover%',
-                                            style: const TextStyle(
-                                              color: Color(0xFF38BDF8),
-                                              fontSize: 10,
+                                            '${fGhi.round()} W/m²',
+                                            style: TextStyle(
+                                              color: textPrimary,
+                                              fontSize: 13,
                                               fontWeight: FontWeight.bold,
                                             ),
                                           ),
-                                        Text(
-                                          '${fGhi.round()} W/m²',
-                                          style: TextStyle(
-                                            color: textPrimary,
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.bold,
+                                          Text(
+                                            'Est: ${pExpFore.round()} W',
+                                            style: TextStyle(
+                                              color: palette.accentSolar,
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w600,
+                                            ),
                                           ),
-                                        ),
-                                        Text(
-                                          'Est: ${pExpFore.round()} W',
-                                          style: TextStyle(
-                                            color: palette.accentSolar,
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
                                     ),
                                   );
                                 },
                               ),
                             ),
+                          ),
+                        );
+                      },
                     ),
                 const SizedBox(height: 24),
                 Text(
@@ -613,6 +701,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       primaryColor: textPrimary,
                       accentColor: accentSolar,
                       isNight: isNight,
+                      index: 1,
                     ),
                     _buildMetricCard(
                       title: 'Voltaje DC',
@@ -629,6 +718,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       primaryColor: textPrimary,
                       accentColor: accentSolar,
                       isNight: isNight,
+                      index: 2,
                     ),
                     _buildMetricCard(
                       title: 'Corriente DC',
@@ -645,6 +735,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       primaryColor: textPrimary,
                       accentColor: accentSolar,
                       isNight: isNight,
+                      index: 3,
                     ),
                     _buildMetricCard(
                       title: 'Irradiancia (GHI)',
@@ -659,6 +750,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       accentColor: accentSolar,
                       isComparison: false,
                       isNight: isNight,
+                      index: 4,
                     ),
 
                     // Tarjeta Seguidor SAT (1 Eje)
@@ -675,6 +767,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       isComparison: false,
                       valueFontSize: 24,
                       isNight: isNight,
+                      index: 5,
                     ),
 
                     // Tarjeta interactiva: Velocidad del Viento
@@ -711,93 +804,102 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             ? Colors.redAccent
                             : (isWindWarning ? Colors.orange.shade300 : textMuted);
 
-                        return GestureDetector(
-                          onTap: () => _showWindProtectionModal(
-                            context: context,
-                            windKmh: windKmh,
-                            currentAngle: currentAngle,
-                            isStow: isStow,
-                            isNight: isNight,
-                            palette: palette,
-                            mqttService: mqttService,
-                          ),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: windCardBg,
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: windCardBorder, width: windBorderWidth),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: isWindCritical
-                                      ? Colors.red.withValues(alpha: 0.3)
-                                      : (isWindWarning
-                                          ? Colors.orange.withValues(alpha: 0.2)
-                                          : (isNight
-                                              ? Colors.black.withValues(alpha: 0.25)
-                                              : HeliosTheme.blueFantastic.withValues(alpha: 0.06))),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
+                        return StaggeredEntrance(
+                          index: 6,
+                          child: HoverCard(
+                            scaleFactor: 1.02,
+                            onTap: () => _showWindProtectionModal(
+                              context: context,
+                              windKmh: windKmh,
+                              currentAngle: currentAngle,
+                              isStow: isStow,
+                              isNight: isNight,
+                              palette: palette,
+                              mqttService: mqttService,
+                              webService: webService,
+                              useWeb: useWeb,
                             ),
-                            padding: const EdgeInsets.all(14),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Flexible(
-                                      child: Text(
-                                        'Velocidad del Viento',
-                                        style: TextStyle(
-                                          color: isWindCritical || isWindWarning
-                                              ? windSubtitleColor
-                                              : textMuted,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: windCardBg,
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(color: windCardBorder, width: windBorderWidth),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: isWindCritical
+                                        ? Colors.red.withValues(alpha: 0.3)
+                                        : (isWindWarning
+                                            ? Colors.orange.withValues(alpha: 0.2)
+                                            : (isNight
+                                                ? Colors.black.withValues(alpha: 0.25)
+                                                : HeliosTheme.blueFantastic.withValues(alpha: 0.06))),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ],
+                              ),
+                              padding: const EdgeInsets.all(14),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Flexible(
+                                        child: Text(
+                                          'Velocidad del Viento',
+                                          style: TextStyle(
+                                            color: isWindCritical || isWindWarning
+                                                ? windSubtitleColor
+                                                : textMuted,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
                                         ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.all(6),
+                                        decoration: BoxDecoration(
+                                          color: windIconColor.withValues(alpha: 0.15),
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        child: PulsingGlow(
+                                          duration: const Duration(milliseconds: 1400),
+                                          child: Icon(Icons.air, color: windIconColor, size: 18),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      AnimatedMetricText(
+                                        text: '${windKmh.toStringAsFixed(1)} km/h',
+                                        style: TextStyle(
+                                          color: textPrimary,
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        windSubtitle,
+                                        style: TextStyle(
+                                          color: windSubtitleColor,
+                                          fontSize: 10,
+                                          fontWeight: isWindCritical || isWindWarning
+                                              ? FontWeight.bold
+                                              : FontWeight.normal,
+                                        ),
+                                        maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                       ),
-                                    ),
-                                    Container(
-                                      padding: const EdgeInsets.all(6),
-                                      decoration: BoxDecoration(
-                                        color: windIconColor.withValues(alpha: 0.15),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Icon(Icons.air, color: windIconColor, size: 18),
-                                    ),
-                                  ],
-                                ),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      '${windKmh.toStringAsFixed(1)} km/h',
-                                      style: TextStyle(
-                                        color: textPrimary,
-                                        fontSize: 24,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      windSubtitle,
-                                      style: TextStyle(
-                                        color: windSubtitleColor,
-                                        fontSize: 10,
-                                        fontWeight: isWindCritical || isWindWarning
-                                            ? FontWeight.bold
-                                            : FontWeight.normal,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
-                                ),
-                              ],
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         );
@@ -805,70 +907,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
 
                     // Tarjeta clickeable: Estado del Sistema
-                    GestureDetector(
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => const ScadaErrorsScreen()),
-                      ),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: statusColor,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: statusBorderColor,
-                            width: hasError || isNight ? 2 : 1,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: isNight
-                                  ? Colors.black.withValues(alpha: 0.25)
-                                  : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
-                              blurRadius: 8,
-                              offset: const Offset(0, 3),
+                    StaggeredEntrance(
+                      index: 7,
+                      child: HoverCard(
+                        scaleFactor: 1.02,
+                        onTap: () => _onTabSelected(1),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: statusColor,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: statusBorderColor,
+                              width: hasError || isNight ? 2 : 1,
                             ),
-                          ],
-                        ),
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              statusIcon,
-                              color: statusIconColor,
-                              size: 32,
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Estado del Sistema',
-                              style: TextStyle(color: textMuted, fontSize: 11),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              alertMessage,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: textPrimary,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
+                            boxShadow: [
+                              BoxShadow(
+                                color: isNight
+                                    ? Colors.black.withValues(alpha: 0.25)
+                                    : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
+                                blurRadius: 8,
+                                offset: const Offset(0, 3),
                               ),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  'Ver SCADA',
-                                  style: TextStyle(
-                                      color: accentSolar, fontSize: 10, fontWeight: FontWeight.bold),
+                            ],
+                          ),
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              PulsingGlow(
+                                duration: const Duration(milliseconds: 1300),
+                                child: Icon(
+                                  statusIcon,
+                                  color: statusIconColor,
+                                  size: 32,
                                 ),
-                                Icon(Icons.arrow_forward_ios,
-                                    color: accentSolar, size: 10),
-                              ],
-                            ),
-                          ],
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                'Estado del Sistema',
+                                style: TextStyle(color: textMuted, fontSize: 11),
+                              ),
+                              const SizedBox(height: 4),
+                              AnimatedMetricText(
+                                text: alertMessage,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: textPrimary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    'Ver SCADA',
+                                    style: TextStyle(
+                                        color: accentSolar, fontSize: 10, fontWeight: FontWeight.bold),
+                                  ),
+                                  Icon(Icons.arrow_forward_ios,
+                                      color: accentSolar, size: 10),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -877,23 +980,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 const SizedBox(height: 24),
 
                 // --- NUEVA GRÁFICA EN TIEMPO REAL (TAREA 5) ---
-                MultimodalChartContainer(
-                  cardColor: cardColor,
-                  cardBorderColor: cardBorderColor,
-                  textMuted: textMuted,
-                  textPrimary: textPrimary,
-                  isNight: isNight,
-                  forecastData: _forecastData,
+                StaggeredEntrance(
+                  index: 8,
+                  child: MultimodalChartContainer(
+                    cardColor: cardColor,
+                    cardBorderColor: cardBorderColor,
+                    textMuted: textMuted,
+                    textPrimary: textPrimary,
+                    isNight: isNight,
+                    forecastData: _forecastData.isNotEmpty
+                        ? _forecastData
+                        : (useWeb ? webService.forecastData : []),
+                  ),
                 ),
-                const SizedBox(height: 40),
+                const SizedBox(height: 84),
                   ],
                 ),
               ),
             ],
           ),
         ),
-      ),
-    );
+        const ScadaErrorsScreen(isTab: true),
+        const PlantConfigScreen(isTab: true),
+      ],
+    ),
+  ),
+);
   }
 
   void _showWindProtectionModal({
@@ -904,6 +1016,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     required bool isNight,
     required WeatherPalette palette,
     required MqttService mqttService,
+    WebTelemetryService? webService,
+    bool useWeb = false,
   }) {
     final Color dialogBg = isNight ? const Color(0xFF1E293B) : Colors.white;
     final Color textPri = isNight ? HeliosTheme.palladian : const Color(0xFF0F172A);
@@ -916,9 +1030,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            final bool currentManual = mqttService.manualStow;
-            final bool currentStow = mqttService.isStow;
-            final double currentDeg = mqttService.currentAngle;
+            final bool currentManual = (useWeb && webService != null)
+                ? webService.manualStow
+                : mqttService.manualStow;
+            final bool currentStow = (useWeb && webService != null)
+                ? webService.isStow
+                : mqttService.isStow;
+            final double currentDeg = (useWeb && webService != null)
+                ? webService.currentAngle
+                : mqttService.currentAngle;
 
             return AlertDialog(
               backgroundColor: dialogBg,
@@ -1088,6 +1208,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         onPressed: () {
                           final bool newStow = !currentManual;
                           mqttService.publishTrackerCommand(manualStow: newStow);
+                          if (useWeb && webService != null) {
+                            webService.setManualStow(newStow);
+                          }
                           setModalState(() {});
                         },
                       ),
@@ -1121,74 +1244,82 @@ class _DashboardScreenState extends State<DashboardScreen> {
     required bool isNight,
     bool isComparison = true,
     double valueFontSize = 22,
+    int index = 0,
+    VoidCallback? onTap,
   }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: cardBorderColor, width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: isNight
-                ? Colors.black.withValues(alpha: 0.25)
-                : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
+    return StaggeredEntrance(
+      index: index,
+      child: HoverCard(
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: cardBorderColor, width: 1),
+            boxShadow: [
+              BoxShadow(
+                color: isNight
+                    ? Colors.black.withValues(alpha: 0.25)
+                    : HeliosTheme.blueFantastic.withValues(alpha: 0.06),
+                blurRadius: 8,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
-        ],
-      ),
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Flexible(
-                child: Text(
-                  title,
-                  style: TextStyle(
-                    color: mutedColor,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Flexible(
+                    child: Text(
+                      title,
+                      style: TextStyle(
+                        color: mutedColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                  overflow: TextOverflow.ellipsis,
-                ),
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: accentColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(icon, color: accentColor, size: 18),
+                  ),
+                ],
               ),
-              Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                  color: accentColor.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(icon, color: accentColor, size: 18),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AnimatedMetricText(
+                    text: realValue,
+                    style: TextStyle(
+                      color: primaryColor,
+                      fontSize: valueFontSize,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  AnimatedMetricText(
+                    text: isComparison ? 'Esperado: $expValue' : expValue,
+                    style: TextStyle(
+                      color: mutedColor,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                realValue,
-                style: TextStyle(
-                  color: primaryColor,
-                  fontSize: valueFontSize,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                isComparison ? 'Esperado: $expValue' : expValue,
-                style: TextStyle(
-                  color: mutedColor,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -1222,11 +1353,19 @@ class MultimodalChartContainer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mqttService = context.watch<MqttService>();
-    final livePoints = mqttService.livePowerPoints;
-    final double currentExp =
-        (mqttService.spaData['p_exp'] as num?)?.toDouble() ?? 0.0;
-    final double? currentReal =
-        (mqttService.telemetryData['power_w'] as num?)?.toDouble();
+    final webService = kIsWeb ? context.watch<WebTelemetryService>() : null;
+    final bool useWeb = kIsWeb &&
+        mqttService.telemetryData.isEmpty &&
+        mqttService.spaData.isEmpty &&
+        webService != null;
+
+    final livePoints = useWeb ? webService.livePowerPoints : mqttService.livePowerPoints;
+    final double currentExp = useWeb
+        ? ((webService.spaData['p_exp'] as num?)?.toDouble() ?? 0.0)
+        : ((mqttService.spaData['p_exp'] as num?)?.toDouble() ?? 0.0);
+    final double? currentReal = useWeb
+        ? ((webService.telemetryData['power_w'] as num?)?.toDouble())
+        : ((mqttService.telemetryData['power_w'] as num?)?.toDouble());
 
     final List<FlSpot> expSpots = [];
     final List<FlSpot> realSpots = [];
@@ -1290,8 +1429,10 @@ class MultimodalChartContainer extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // CABECERA Y LEYENDA VISUAL CLARA
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text(
                 'Potencia: Esperada vs. Real (W)',
@@ -1303,6 +1444,7 @@ class MultimodalChartContainer extends StatelessWidget {
                 ),
               ),
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
                     width: 12,
@@ -1529,7 +1671,7 @@ Widget _buildHourlyWeatherIcon(
 // ===========================================================
 // PAISAJE MINIMALISTA VECTORIAL / PROCEDURAL (CUSTOM PAINTER)
 // ===========================================================
-class WeatherHeaderScene extends StatelessWidget {
+class WeatherHeaderScene extends StatefulWidget {
   final String weatherState;
   final bool isNight;
   final Color? hillBottomColor;
@@ -1544,9 +1686,32 @@ class WeatherHeaderScene extends StatelessWidget {
   });
 
   @override
+  State<WeatherHeaderScene> createState() => _WeatherHeaderSceneState();
+}
+
+class _WeatherHeaderSceneState extends State<WeatherHeaderScene>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _animCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 12),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _animCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: height,
+      height: widget.height,
       width: double.infinity,
       child: ShaderMask(
         shaderCallback: (Rect bounds) {
@@ -1562,13 +1727,19 @@ class WeatherHeaderScene extends StatelessWidget {
           ).createShader(bounds);
         },
         blendMode: BlendMode.dstIn,
-        child: CustomPaint(
-          size: Size(double.infinity, height),
-          painter: _WeatherScenePainter(
-            weatherState: weatherState,
-            isNight: isNight,
-            hillBottomColor: hillBottomColor,
-          ),
+        child: AnimatedBuilder(
+          animation: _animCtrl,
+          builder: (context, _) {
+            return CustomPaint(
+              size: Size(double.infinity, widget.height),
+              painter: _WeatherScenePainter(
+                weatherState: widget.weatherState,
+                isNight: widget.isNight,
+                hillBottomColor: widget.hillBottomColor,
+                animProgress: _animCtrl.value,
+              ),
+            );
+          },
         ),
       ),
     );
@@ -1579,11 +1750,13 @@ class _WeatherScenePainter extends CustomPainter {
   final String weatherState;
   final bool isNight;
   final Color? hillBottomColor;
+  final double animProgress;
 
   _WeatherScenePainter({
     required this.weatherState,
     required this.isNight,
     this.hillBottomColor,
+    this.animProgress = 0.0,
   });
 
   @override
@@ -1667,15 +1840,18 @@ class _WeatherScenePainter extends CustomPainter {
         Offset(size.width * 0.88, size.height * 0.25),
         Offset(size.width * 0.94, size.height * 0.15),
       ];
-      for (final star in stars) {
-        canvas.drawCircle(star, 1.2, starPaint);
+      for (int i = 0; i < stars.length; i++) {
+        final double twinkle = (0.35 + 0.65 * math.sin((animProgress * 2 * math.pi) + (i * 1.6)).abs()).clamp(0.0, 1.0);
+        starPaint.color = Colors.white.withValues(alpha: twinkle);
+        canvas.drawCircle(stars[i], 1.2, starPaint);
       }
 
       final Offset moonCenter = Offset(size.width * 0.82, size.height * 0.32);
+      final double moonPulse = 1.0 + 0.04 * math.sin(animProgress * 2 * math.pi);
       final Paint moonHalo = Paint()
         ..color = const Color(0xFFFEF08A).withValues(alpha: 0.25)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12);
-      canvas.drawCircle(moonCenter, 20, moonHalo);
+      canvas.drawCircle(moonCenter, 20 * moonPulse, moonHalo);
 
       final Paint moonBody = Paint()..color = const Color(0xFFFEF9C3);
       canvas.drawCircle(moonCenter, 14, moonBody);
@@ -1684,10 +1860,11 @@ class _WeatherScenePainter extends CustomPainter {
       canvas.drawCircle(Offset(moonCenter.dx - 5, moonCenter.dy - 3), 12, moonCut);
     } else {
       final Offset sunCenter = Offset(size.width * 0.82, size.height * 0.30);
+      final double sunPulse = 1.0 + 0.08 * math.sin(animProgress * 2 * math.pi);
       final Paint sunGlow = Paint()
         ..color = const Color(0xFFFBBF24).withValues(alpha: 0.35)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18);
-      canvas.drawCircle(sunCenter, 32, sunGlow);
+      canvas.drawCircle(sunCenter, 32 * sunPulse, sunGlow);
 
       final Paint sunCore = Paint()..color = const Color(0xFFFDE047);
       canvas.drawCircle(sunCenter, 16, sunCore);
@@ -1704,10 +1881,11 @@ class _WeatherScenePainter extends CustomPainter {
               ? const Color(0xFF1E293B).withValues(alpha: 0.7)
               : Colors.white.withValues(alpha: 0.75);
 
-      _drawCloud(canvas, Offset(size.width * 0.25, size.height * 0.32), 24, cloudColor);
-      _drawCloud(canvas, Offset(size.width * 0.78, size.height * 0.34), 30, cloudColor);
+      final double drift = math.sin(animProgress * 2 * math.pi) * 12.0;
+      _drawCloud(canvas, Offset(size.width * 0.25 + drift, size.height * 0.32), 24, cloudColor);
+      _drawCloud(canvas, Offset(size.width * 0.78 - drift * 0.7, size.height * 0.34), 30, cloudColor);
       if (weatherState == 'cloudy' || weatherState == 'rain' || weatherState == 'storm') {
-        _drawCloud(canvas, Offset(size.width * 0.50, size.height * 0.26), 28, cloudColor);
+        _drawCloud(canvas, Offset(size.width * 0.50 + drift * 0.5, size.height * 0.26), 28, cloudColor);
       }
     }
 
@@ -1719,7 +1897,7 @@ class _WeatherScenePainter extends CustomPainter {
 
       for (int i = 0; i < 24; i++) {
         final double rx = (size.width * (i * 0.042 + 0.02)) % size.width;
-        final double ry = size.height * 0.20 + (i % 6) * 12.0;
+        final double ry = (size.height * 0.15 + (i * 12.0) + (animProgress * size.height * 0.8)) % (size.height * 0.65);
         canvas.drawLine(Offset(rx, ry), Offset(rx - 7, ry + 16), rainPaint);
       }
     }
@@ -1908,6 +2086,7 @@ class _WeatherScenePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _WeatherScenePainter oldDelegate) {
     return oldDelegate.weatherState != weatherState ||
-        oldDelegate.isNight != isNight;
+        oldDelegate.isNight != isNight ||
+        oldDelegate.animProgress != animProgress;
   }
 }

@@ -1,14 +1,17 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../database/db_platform.dart';
 import '../services/mqtt_service.dart';
+import '../services/web_telemetry_service.dart';
 import '../theme/helios_theme.dart';
 import '../theme/weather_palette.dart';
 
 class PlantConfigScreen extends StatefulWidget {
-  const PlantConfigScreen({super.key});
+  final bool isTab;
+  const PlantConfigScreen({super.key, this.isTab = false});
 
   @override
   State<PlantConfigScreen> createState() => _PlantConfigScreenState();
@@ -1015,10 +1018,16 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
   @override
   Widget build(BuildContext context) {
     final mqttService = context.watch<MqttService>();
-    final String weatherState = mqttService.weatherState;
-    final bool isNight = mqttService.isNight;
+    final webService = kIsWeb ? context.watch<WebTelemetryService>() : null;
+    final bool useWeb = kIsWeb &&
+        mqttService.telemetryData.isEmpty &&
+        mqttService.spaData.isEmpty &&
+        webService != null;
+
+    final String weatherState = useWeb ? webService.weatherState : mqttService.weatherState;
+    final bool isNight = useWeb ? webService.isNight : mqttService.isNight;
     final palette = WeatherPalette.getPalette(weatherState, isNight);
-    final spa = mqttService.spaData;
+    final spa = useWeb ? webService.spaData : mqttService.spaData;
 
     final double spaLat = (spa['lat'] as num?)?.toDouble() ?? _lat;
     final double spaLon = (spa['lon'] as num?)?.toDouble() ?? _lon;
@@ -1038,8 +1047,8 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
       extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        elevation: 0,
-        leading: BackButton(color: appBarItemColor),
+        automaticallyImplyLeading: !widget.isTab,
+        leading: widget.isTab ? null : BackButton(color: appBarItemColor),
         title: Text(
           'Configuración de Planta',
           style: TextStyle(
@@ -1130,11 +1139,12 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'POTENCIA PICO INSTALADA',
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'POTENCIA PICO INSTALADA',
                             style: TextStyle(
                               color: textMuted,
                               fontSize: 12,
@@ -1161,7 +1171,9 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                           ),
                         ],
                       ),
-                      Container(
+                    ),
+                    const SizedBox(width: 12),
+                    Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
                           color: _accentBlue.withValues(alpha: 0.12),
@@ -1373,8 +1385,12 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  runAlignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 12,
+                  runSpacing: 8,
                   children: [
                     Text(
                       'Parámetros Eléctricos del Arreglo',
@@ -1530,7 +1546,7 @@ class _PlantConfigScreenState extends State<PlantConfigScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
+                SizedBox(height: widget.isTab ? 96 : 24),
               ],
             ),
           ),

@@ -161,12 +161,30 @@ bool isProvisioningFileMissing() {
   return false;
 }
 
+final Map<String, String> _webConfigStore = {};
+
 String? readConfigFile(String path) {
-  // En Web se utilizan los datos por defecto / fallback
+  if (_webConfigStore.containsKey(path)) {
+    return _webConfigStore[path];
+  }
+  if (path == '/data/wifi_config.json') {
+    return json.encode({
+      'ssid': 'Planta_Industrial_Solar',
+      'voc': 49.6,
+      'isc': 14.0,
+      'wp': 550.0,
+      'serie': 18,
+      'paralelo': 4,
+      'lat': 19.6800,
+      'lon': -99.0100,
+      'city': 'Ojo de Agua, EdoMex',
+    });
+  }
   return null;
 }
 
 bool writeConfigFile(String path, String content) {
+  _webConfigStore[path] = content;
   return true;
 }
 

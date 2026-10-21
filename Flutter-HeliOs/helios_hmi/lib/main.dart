@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 
 import 'database/db_platform.dart';
 import 'services/mqtt_service.dart';
+import 'services/web_telemetry_service.dart';
+import 'theme/helios_animations.dart';
 import 'theme/helios_theme.dart';
 import 'ui/dashboard.dart';
 import 'ui/provisioning_screen.dart';
@@ -20,6 +22,9 @@ void main() {
       providers: [
         ChangeNotifierProvider(
           create: (_) => MqttService()..connect('127.0.0.1'),
+        ),
+        ChangeNotifierProvider(
+          create: (_) => WebTelemetryService(),
         ),
       ],
       child: const HeliosApp(),
@@ -47,6 +52,16 @@ class HeliosApp extends StatelessWidget {
           primary: HeliosTheme.burningFlame,
           secondary: HeliosTheme.truffleTrouble,
           surface: HeliosTheme.blueFantastic,
+        ),
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            TargetPlatform.android: HeliosPageTransitionsBuilder(),
+            TargetPlatform.iOS: HeliosPageTransitionsBuilder(),
+            TargetPlatform.windows: HeliosPageTransitionsBuilder(),
+            TargetPlatform.linux: HeliosPageTransitionsBuilder(),
+            TargetPlatform.macOS: HeliosPageTransitionsBuilder(),
+            TargetPlatform.fuchsia: HeliosPageTransitionsBuilder(),
+          },
         ),
       ),
       home: const RootController(),
@@ -96,8 +111,22 @@ class _RootControllerState extends State<RootController> {
 
   @override
   Widget build(BuildContext context) {
-    return _isProvisioningMode
-        ? const ProvisioningScreen()
-        : const DashboardScreen();
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 450),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.98, end: 1.0).animate(animation),
+            child: child,
+          ),
+        );
+      },
+      child: _isProvisioningMode
+          ? const ProvisioningScreen(key: ValueKey('provisioning'))
+          : const DashboardScreen(key: ValueKey('dashboard')),
+    );
   }
 }

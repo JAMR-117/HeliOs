@@ -1,11 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqlite3/common.dart' as sql;
 import 'package:helios_hmi/database/db_platform.dart'; 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/mqtt_service.dart';
+import '../services/web_telemetry_service.dart';
+import '../theme/helios_animations.dart';
 import '../theme/helios_theme.dart';
 import '../theme/weather_palette.dart';
 
@@ -22,7 +25,8 @@ class ScadaErrorRecord {
 }
 
 class ScadaErrorsScreen extends StatefulWidget {
-  const ScadaErrorsScreen({super.key});
+  final bool isTab;
+  const ScadaErrorsScreen({super.key, this.isTab = false});
 
   @override
   State<ScadaErrorsScreen> createState() => _ScadaErrorsScreenState();
@@ -147,14 +151,20 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
   @override
   Widget build(BuildContext context) {
     final mqttService = context.watch<MqttService>();
-    final scada = mqttService.scadaData;
+    final webService = kIsWeb ? context.watch<WebTelemetryService>() : null;
+    final bool useWeb = kIsWeb &&
+        mqttService.telemetryData.isEmpty &&
+        mqttService.spaData.isEmpty &&
+        webService != null;
+
+    final scada = useWeb ? webService.scadaData : mqttService.scadaData;
     final int activeCode = (scada['code'] as num?)?.toInt() ?? 0;
     final String activeDesc =
         scada['description'] as String? ?? 'Operación Normal';
     final bool hasActiveAlarm = activeCode != 0;
 
-    final String weatherState = mqttService.weatherState;
-    final bool isNight = mqttService.isNight;
+    final String weatherState = useWeb ? webService.weatherState : mqttService.weatherState;
+    final bool isNight = useWeb ? webService.isNight : mqttService.isNight;
     final palette = WeatherPalette.getPalette(weatherState, isNight);
 
     // Paleta cromática adaptativa al clima
@@ -197,7 +207,8 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
         appBar: AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,
-          leading: BackButton(color: appBarItemColor),
+          automaticallyImplyLeading: !widget.isTab,
+          leading: widget.isTab ? null : BackButton(color: appBarItemColor),
           title: Text(
             'Bitácora de Errores SCADA',
             style: TextStyle(
@@ -256,15 +267,20 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                       ),
                       child: Row(
                         children: [
-                          Icon(
-                            hasActiveAlarm
-                                ? Icons.warning_amber_rounded
-                                : Icons.check_circle_outline,
-                            color: hasActiveAlarm
-                                ? _accentOrange
-                                : const Color(0xFF10B981),
-                            size: 34,
-                          ),
+                          hasActiveAlarm
+                              ? const PulsingGlow(
+                                  duration: Duration(milliseconds: 1100),
+                                  child: Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: _accentOrange,
+                                    size: 34,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.check_circle_outline,
+                                  color: Color(0xFF10B981),
+                                  size: 34,
+                                ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Column(
@@ -389,16 +405,20 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                           final record = combinedLogs[index];
                           final severityColor = _getSeverityColor(record.code);
 
-                          return Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16.0,
-                              vertical: 12.0,
-                            ),
-                            decoration: BoxDecoration(
-                              color: cardColor,
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: cardBorderColor),
-                            ),
+                          return StaggeredEntrance(
+                            index: index,
+                            child: HoverCard(
+                              scaleFactor: 1.015,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16.0,
+                                  vertical: 12.0,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: cardColor,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: cardBorderColor),
+                                ),
                             child: Row(
                               children: [
                                 Container(
@@ -452,11 +472,13 @@ class _ScadaErrorsScreenState extends State<ScadaErrorsScreen> {
                                 ),
                               ],
                             ),
-                          );
-                        },
+                          ),
+                        ),
+                      );
+                    },
                       ),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: widget.isTab ? 90 : 12),
             ],
           ),
         ),
